@@ -1,0 +1,86 @@
+{
+  "steps": [
+    1500,
+    3000,
+    4500,
+    6000,
+    7500,
+    9000,
+    10000
+  ],
+  "results": {
+    "1500": {
+      "val_loss": 1.3856016397476196,
+      "val_loss_std": null,
+      "train_loss": 1.1195223331451416,
+      "train_loss_std": null,
+      "val_l1_loss": 0.47737849147362627,
+      "train_l1_loss": 0.22380643426418725,
+      "ratio": 1.2376721738591543
+    },
+    "3000": {
+      "val_loss": 0.731130838394165,
+      "val_loss_std": null,
+      "train_loss": 0.43930715322494507,
+      "train_loss_std": null,
+      "val_l1_loss": 0.44833497518000115,
+      "train_l1_loss": 0.16189757635556687,
+      "ratio": 1.6642816603985346
+    },
+    "4500": {
+      "val_loss": 0.5620280504226685,
+      "val_loss_std": null,
+      "train_loss": 0.24863098561763763,
+      "train_loss_std": null,
+      "val_l1_loss": 0.4427846444763232,
+      "train_l1_loss": 0.13281252092039988,
+      "ratio": 2.260490779242596
+    },
+    "6000": {
+      "val_loss": 0.5036233067512512,
+      "val_loss_std": null,
+      "train_loss": 0.1845424473285675,
+      "train_loss_std": null,
+      "val_l1_loss": 0.4355329208346023,
+      "train_l1_loss": 0.11857381016834752,
+      "ratio": 2.729037758205179
+    },
+    "7500": {
+      "val_loss": 0.47622954845428467,
+      "val_loss_std": null,
+      "train_loss": 0.15190567076206207,
+      "train_loss_std": null,
+      "val_l1_loss": 0.43064227334676525,
+      "train_l1_loss": 0.10768381164013006,
+      "ratio": 3.135034696632414
+    },
+    "9000": {
+      "val_loss": 0.4708832800388336,
+      "val_loss_std": null,
+      "train_loss": 0.1279207468032837,
+      "train_loss_std": null,
+      "val_l1_loss": 0.43903410576496593,
+      "train_l1_loss": 0.09704914466321492,
+      "ratio": 3.681054807809691
+    },
+    "10000": {
+      "val_loss": 0.46536704897880554,
+      "val_loss_std": null,
+      "train_loss": 0.12292859703302383,
+      "train_loss_std": null,
+      "val_l1_loss": 0.4372287374731334,
+      "train_l1_loss": 0.09559982633101205,
+      "ratio": 3.78566956925237
+    }
+  },
+  "val_episodes": [
+    5,
+    7,
+    9
+  ],
+  "train_episodes": [
+    0,
+    1
+  ],
+  "passes": 1
+}

@@ -1,0 +1,56 @@
+<mujoco model="scene">
+    <!-- 기본 옵션(noslip_iterations=0)은 마찰을 근사적으로만 풀어서, 그리퍼로
+         집은 물체가 몇 초에 걸쳐 서서히 미끄러져 빠지는 문제가 있었음(순수 물리
+         proxy 테스트로 확인: 기본값 6초에 9.6mm 이탈 -> noslip_iterations=5
+         추가만으로 0.005mm로 개선). impratio/elliptic cone도 함께 적용해 grasp
+         안정성을 더 높임. -->
+    <option cone="elliptic" impratio="10" noslip_iterations="5" />
+
+    <include file="so101_new_calib.xml" />
+
+    <visual>
+        <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0" />
+        <rgba haze="0.15 0.25 0.35 1" />
+        <global azimuth="160" elevation="-20" />
+    </visual>
+
+    <asset>
+        <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512"
+            height="3072" />
+        <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4"
+            rgb2="0.1 0.2 0.3"
+            markrgb="0.8 0.8 0.8" width="300" height="300" />
+        <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5"
+            reflectance="0.2" />
+    </asset>
+
+    <worldbody>
+        <light pos="0 0 3.5" dir="0 0 -1" directional="true" />
+        <geom name="floor" size="0 0 0.05" pos="0 0 0" type="plane" material="groundplane" />
+
+        <!-- pick-and-place용 물체. 자유관절(freejoint)로 붙어 있어 그리퍼로 집어서
+             옮길 수 있다. 그리퍼가 평행 집게가 아니라 스쿱(고정 턱)+후크(가동 턱)
+             구조라, 이전 2.5cm 정육면체는 스쿱 폭 대비 너무 커서 잘 집히지
+             않았음. 크기를 낮추고 friction/condim/solref/solimp을 강화해
+             집었을 때 미끄러지거나 파고들지 않도록 함. 로봇 기준 x=0.20m
+             지점(팔을 굽혀 뻗으면 닿는 거리)에 배치.
+             2단계 조정: 후크가 면 접촉이 아니라 모서리/부분 접촉으로 감싸는
+             경우, 미끄러짐 마찰(1.8)만 높고 회전/구름 마찰(0.03)이 낮으면
+             들어올릴 때 접촉선을 축으로 굴러서 빠질 수 있음 -- 회전/구름
+             마찰을 크게 올리고, 2cm 크기 대비 과도했던 질량(15g, 밀도
+             1.9g/cc)도 낮춤. -->
+        <body name="pick_object" pos="0.20 0 0.01">
+            <freejoint name="pick_object_free" />
+            <geom name="pick_object_geom" type="box" size="0.01 0.01 0.01"
+                rgba="0.85 0.2 0.2 1" mass="0.008" friction="2.5 0.3 0.15" condim="6"
+                solref="0.004 1" solimp="0.95 0.99 0.001" />
+        </body>
+
+        <!-- place용 접시. 자유관절 없이 world에 고정된 얇은 원판(충돌 있음)이라
+             물체를 실제로 그 위에 올려놓을 수 있다. -->
+        <body name="place_plate" pos="0.20 0.15 0.003">
+            <geom name="place_plate_geom" type="cylinder" size="0.045 0.003"
+                rgba="0.85 0.85 0.8 1" friction="0.6 0.005 0.0001" />
+        </body>
+    </worldbody>
+</mujoco>

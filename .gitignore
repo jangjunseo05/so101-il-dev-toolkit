@@ -1,0 +1,37 @@
+# Runtime / machine-specific data — never shared between teammates
+data/
+checkpoints/
+logs/
+state/
+train_runs/
+*.log
+
+# Per-teammate local settings (COM port, calibration id, dataset paths)
+config/local_settings.json
+
+# Physical-arm-specific servo calibration — copying this to a different
+# physical arm silently applies wrong homing offsets/joint ranges. Each
+# teammate generates their own via docs/REAL_LEADER_SETUP.md step 4.
+config/full_arm_calibration_leader.json
+
+# Knowledge-graph tooling artifacts (irrelevant to teammates)
+graphify-out/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.ipynb_checkpoints/
+
+# Streamlit local overrides / secrets, if ever created
+.streamlit/secrets.toml
+
+# Editor/OS cruft
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
+
+# Claude Code local session/tooling state
+.claude/

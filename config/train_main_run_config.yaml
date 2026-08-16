@@ -1,0 +1,72 @@
+dataset:
+  repo_id: so101_teleop_real
+  # 이 절대경로는 이 컴퓨터 전용이며, clone한 다른 컴퓨터에서는 존재하지 않는다.
+  # 대시보드의 "새 학습 시작"(dashboard/pages/3_ACT_학습.py)은 실행 시
+  # --dataset.root=<이 컴퓨터의 config/local_settings.json root 값>으로 이 값을
+  # 항상 덮어쓰므로 대시보드 경로에서는 무시된다. 터미널에서
+  # `lerobot-train --config_path=config/train_main_run_config.yaml`을 직접
+  # 실행할 경우에만 아래 값이 그대로 쓰이므로, 그 전에 자신의 프로젝트 폴더
+  # 기준 경로로 반드시 고쳐서 쓸 것 (예: <clone한 경로>/data/so101_teleop_real).
+  root: C:/Users/USER/Desktop/mujoco/SO-ARM100/Simulation/SO101/so101_web/data/so101_teleop_real
+  # CLAUDE.md 24-3절 train_episodes (episode 11은 S 키 오조작으로 인한 무효
+  # 데모로 확인되어 제외, 24-3절 참고)
+  episodes: [0, 1, 2, 3, 4, 6, 8, 10, 12, 13, 14, 15, 16]
+
+policy:
+  type: act
+  device: cuda
+  push_to_hub: false
+  normalization_mapping:
+    VISUAL: IDENTITY
+    STATE: MEAN_STD
+    ACTION: MEAN_STD
+
+output_dir: ./train_main_run_output
+job_name: main_run_10k
+seed: 1000
+
+# 벤치마크로 확인: 이 데이터셋(이미지 포함, 480x640)은 GPU 연산(updt_s ~0.15-0.17s
+# @batch=8)보다 데이터 로딩(data_s)이 압도적 병목(num_workers=0일 때 ~1.8-2.0s).
+# num_workers=8(logical CPU 16개 중)로 올리자 정상상태 data_s가 대폭 줄어
+# 스텝당 시간이 ~2.0s -> ~0.57s(batch=8 기준)로 개선됨.
+num_workers: 8
+
+# 배치 크기를 8->16/32로 올려도 초당 처리 샘플 수(~14 samples/s)는 거의
+# 그대로였음(데이터 로딩이 병목이라 배치를 키운다고 처리량이 늘지 않음,
+# batch=32/num_workers=8 벤치마크에서 확인) - 즉 배치를 키우는 건 속도보다
+# gradient 노이즈를 줄이는 효과가 큼. 8GB에서 32도 OOM 없이 여유 있게 돌아갔지만,
+# 데이터셋이 작아(13 episodes/6800 frames) 과도하게 큰 배치는 step당 정보 이득
+# 대비 이점이 작다고 판단해 8과 32 사이 중간값인 16으로 선택.
+batch_size: 16
+
+# steps 산정 근거: batch=16/num_workers=8 60-step 벤치마크에서 정상상태
+# (step10~60, 워커 프리페치 버퍼가 다 찬 이후) 평균 ~1.16s/step 측정.
+# 3~4시간 예산 -> 10800~14400s -> 9310~12414 steps 가능. 중간값 근처에서
+# 여유(체크포인트 저장/디스크 I/O 등 오버헤드)를 감안해 10000 steps로 설정
+# (예상 총 소요 ~1.16s x 10000 = 11600s = 3h13m, 4시간 상한 대비 버퍼 있음).
+steps: 10000
+log_freq: 50
+
+# 전체 10000 steps의 15% 간격 (10~20% 범위 내) -> 1500,3000,...,9000 + 마지막
+# 10000 총 7개 체크포인트. 체크포인트 1개당 실측 ~591MB(옵티마이저 상태 포함)로
+# 7개 ~4.1GB, 여유 디스크(181GB) 대비 무시할 수준.
+save_freq: 1500
+
+# lerobot-train의 eval_freq/eval.*는 gym 환경(cfg.env) 기반 rollout 평가
+# 전용으로, cfg.env가 None이면 조건문(`cfg.eval_freq > 0 and cfg.env is not None`,
+# lerobot/scripts/lerobot_train.py:230)에서 걸러져 아예 실행되지 않는다(소스 확인).
+# 우리 MuJoCo 씬은 등록된 gym env 타입이 아니라 여기 값은 사실상 무시됨.
+# 즉 lerobot-train은 "학습 중 held-out 데이터셋 val loss"를 기본 제공하지
+# 않는다 - val_episodes=[5,7,9]를 이 실행 안에서 자동으로 평가하는 내장
+# 옵션은 없음(보고서 참고, 이번엔 train loss만으로 진행).
+eval_freq: 0
+
+wandb:
+  enable: true
+  project: so101-pickplace-act
+  # WANDB_API_KEY 미설정(로그인 안 됨) 확인됨 - online 모드로 두면 인증 실패로
+  # 학습이 멈추거나 대화형 로그인 프롬프트를 기다리며 백그라운드 프로세스가
+  # 행(hang)할 위험이 있어 offline로 강제. offline는 인증 없이 output_dir
+  # 아래 로컬에 run 데이터를 기록하며, 나중에 `wandb sync <경로>`로 온라인
+  # 업로드 가능.
+  mode: offline
