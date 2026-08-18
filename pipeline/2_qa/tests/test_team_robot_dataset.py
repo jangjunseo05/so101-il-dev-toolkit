@@ -193,6 +193,58 @@ def test_performance(wrapped, base) -> dict:
     return result
 
 
+def test_normalize_roundtrip(wrapped) -> dict:
+    """Regression test for normalize()/unnormalize() (CLAUDE.md section 38-2/39):
+    these methods have zero callers anywhere else in the codebase (confirmed via
+    grep across the whole project) -- lerobot-train uses its own independent
+    NormalizerProcessorStep, never TeamRobotDataset's. Kept as a QA-layer
+    diagnostic utility (same category as detect_outliers()/compute_custom_stats(),
+    which also aren't called by the training pipeline) rather than deleted, on
+    the condition that it gets at least this round-trip regression test so a
+    future change to _NORM_EPS or the meta.stats access pattern doesn't silently
+    break it with nothing exercising the code path.
+    """
+    result = {"name": "4. normalize()/unnormalize() round-trip", "pass": False, "detail": ""}
+    try:
+        import torch
+
+        item = wrapped[0]
+        normalized = wrapped.normalize(item)
+        restored = wrapped.unnormalize(normalized)
+
+        checks = []
+        for key in ("action", "observation.state"):
+            orig = item[key]
+            norm = normalized[key]
+            back = restored[key]
+            # MEAN_STD fields must actually change under normalize() (not a no-op
+            # bug) unless std happens to be 0 for every dim, which isn't the case
+            # for a real recorded episode's action/state.
+            changed = not torch.allclose(orig, norm, atol=1e-6)
+            checks.append((f"{key}: normalize() actually changes the value", changed))
+            # round-trip must recover the original within float32 precision.
+            close = torch.allclose(orig, back, atol=1e-4)
+            max_err = (orig - back).abs().max().item()
+            checks.append((f"{key}: unnormalize(normalize(x)) ~= x (max_err={max_err:.2e})", close))
+
+        # image feature: IDENTITY per the 19-2 design decision (this project's
+        # MuJoCo-rendered wrist_cam has near-zero std, so MEAN_STD would blow up
+        # -- see that section's docstring in team_robot_dataset.py). normalize()
+        # must be a byte-exact no-op here, not an approximate one.
+        image_keys = [k for k, ft in wrapped.features.items() if ft["dtype"] in ("image", "video")]
+        for key in image_keys:
+            if key not in item:
+                continue
+            is_identity = torch.equal(item[key], normalized[key])
+            checks.append((f"{key}: IDENTITY normalize() is byte-exact no-op", is_identity))
+
+        result["pass"] = all(ok for _, ok in checks)
+        result["detail"] = "\n".join(f"  {name}: {ok}" for name, ok in checks)
+    except Exception:
+        result["detail"] = "EXCEPTION:\n" + traceback.format_exc()
+    return result
+
+
 def main():
     print(f"dataset root: {DATASET_ROOT}")
     print(f"dataset exists: {DATASET_ROOT.exists()}")
@@ -204,6 +256,7 @@ def main():
         test_dataloader_compatibility(wrapped, base),
         test_meta_delegation(wrapped, base),
         test_performance(wrapped, base),
+        test_normalize_roundtrip(wrapped),
     ]
 
     print("=" * 70)

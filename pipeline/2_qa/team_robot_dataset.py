@@ -112,6 +112,19 @@ class TeamRobotDataset:
         # (meta, features, stats access, etc.) to the wrapped base dataset.
         return getattr(self._base, name)
 
+    def __dir__(self):
+        # __getattr__ makes attribute *access* fully delegate to self._base
+        # (confirmed, CLAUDE.md section 38-3: 37/37 public LeRobotDataset
+        # attrs resolve via getattr()), but dir() doesn't consult
+        # __getattr__ at all -- it only lists what's actually defined on
+        # this class. Without this override, dir(team) showed 10 names
+        # instead of the full delegated surface, which could mislead anyone
+        # exploring the interface via dir()/tab-completion even though
+        # nothing was actually broken functionally. Union, not replace, so
+        # TeamRobotDataset's own methods (detect_outliers, normalize, etc.)
+        # still show up alongside the delegated base ones.
+        return sorted(set(super().__dir__()) | set(dir(self._base)))
+
     @staticmethod
     def _as_int(value) -> int:
         if isinstance(value, torch.Tensor):
@@ -1025,3 +1038,125 @@ class TeamRobotDataset:
         fig.savefig(save_path, dpi=120)
         plt.close(fig)
         return save_path
+
+    def describe_preprocessing(self) -> dict[str, Any]:
+        """Read-only summary of where each standard imitation-learning
+        preprocessing step actually happens in this pipeline (CLAUDE.md
+        sections 39/40) -- built for the QA dashboard's "전처리 구조 보기"
+        detail view, so that page reads structured facts from here rather
+        than a hand-copied paraphrase of the CLAUDE.md prose baked into the
+        page itself (source-of-truth requirement from that request).
+
+        Everything below is a description of *this specific dataset instance
+        and the surrounding pipeline code*, not a live re-derivation --
+        the normalization sample pulls this dataset's actual
+        `self._base.meta.stats`; the 6-item preprocessing table is a fixed
+        description of the pipeline's code structure (team_robot_dataset.py,
+        the installed lerobot policies/act/*.py, lerobot-train's CLI
+        surface), confirmed via direct source inspection in sections 39-41,
+        not something that varies per-dataset. Does not mutate self or read
+        any file beyond what `self._base.meta.stats`/`self._base.features`
+        already loaded.
+        """
+        stats = self._base.meta.stats
+        normalization_samples: list[dict[str, Any]] = []
+        for key in ("action", "observation.state"):
+            if key not in stats:
+                continue
+            feature_stats = stats[key]
+            mean = np.asarray(feature_stats["mean"]).reshape(-1)
+            std = np.asarray(feature_stats["std"]).reshape(-1)
+            names = self._base.features.get(key, {}).get("names")
+            dims = []
+            for i in range(len(mean)):
+                dims.append(
+                    {
+                        "name": names[i] if names and i < len(names) else f"dim{i}",
+                        "mean": float(mean[i]),
+                        "std": float(std[i]),
+                    }
+                )
+            normalization_samples.append({"key": key, "dims": dims})
+
+        normalization = {
+            "summary": (
+                "정규화 통계(mean/std)는 이 TeamRobotDataset이 계산하지 않습니다 -- "
+                "lerobot 자신이 녹화 세션의 에피소드 저장(S/X 키 종료) 시점마다 "
+                "직접 계산해 meta/stats.json에 기록합니다. normalize()/unnormalize()는 "
+                "이 파일을 읽기만 할 뿐 새로 계산하거나 캐싱하지 않습니다. lerobot-train도 "
+                "같은 파일을 자신의 LeRobotDataset 인스턴스로 독립적으로 다시 읽어 "
+                "자체 NormalizerProcessorStep을 구성하므로, 이 TeamRobotDataset의 "
+                "normalize()/unnormalize()는 실제 학습 경로와는 분리된 QA 진단 "
+                "유틸리티입니다(호출자 0건, CLAUDE.md 39절)."
+            ),
+            "source_file": "meta/stats.json",
+            "samples": normalization_samples,
+        }
+
+        preprocessing_items = [
+            {
+                "name": "이미지 리사이즈",
+                "qa_layer": "안 함",
+                "act_policy": "특정 해상도를 가정하지 않음 (2D 위치 임베딩이 실제 feature map 크기로 매 forward마다 동적 계산됨)",
+                "lerobot_train_cli": "옵션 없음",
+                "status": "gap",
+                "status_label": "빈 자리",
+                "note": (
+                    "이 파이프라인 어디에도 리사이즈 로직이 없습니다. 지금 문제가 안 되는 "
+                    "이유는 run_teleop_real.py/run_inference_mujoco.py 둘 다 캡처 해상도를 "
+                    "480x640으로 고정해뒀기 때문(pipeline/camera_config.py, 41절)입니다. "
+                    "카메라를 바꾸거나 해상도가 달라지면 실제로 필요해질 수 있는 자리입니다 -- "
+                    "다만 41절에서 두 스크립트에 방어 코드(렌더 직후 shape assert)를 추가해, "
+                    "두 스크립트의 캡처 해상도가 서로 어긋나면 조용히 넘어가지 않고 즉시 "
+                    "에러로 실패하도록 만들어뒀습니다. 이 방어 코드는 불일치를 감지만 할 뿐, "
+                    "리사이즈 자체를 자동으로 처리해주지는 않습니다."
+                ),
+            },
+            {
+                "name": "이미지 증강",
+                "qa_layer": "안 함",
+                "act_policy": "해당 없음 (데이터 로딩 레벨의 처리)",
+                "lerobot_train_cli": "있음 -- dataset.image_transforms.* (brightness/contrast/saturation/hue/sharpness/affine), 기본값 enable=False",
+                "status": "unused_option",
+                "status_label": "미사용(옵션 존재)",
+                "note": "config/train_main_run_config.yaml에 image_transforms 섹션 자체가 없어 기본값(꺼짐) 그대로 적용되는 중입니다. 코드가 없는 게 아니라 옵션을 안 켠 상태입니다.",
+            },
+            {
+                "name": "액션 델타(상대 표현)",
+                "qa_layer": "안 함",
+                "act_policy": "절대 액션만 사용 (MEAN_STD 정규화만 적용, 델타 표현 없음)",
+                "lerobot_train_cli": "lerobot에 빌딩블록(delta_action_processor.py)은 있으나 ACT 기본 경로엔 배선되지 않음",
+                "status": "not_applicable",
+                "status_label": "이 프로젝트엔 불필요",
+                "note": "이 데이터셋의 action 필드는 처음부터 절대 관절 라디안 값입니다(leader->follower 비례 스케일링 변환 결과, 23절) -- 델타 표현 자체를 선택하는 지점이 설계에 없습니다.",
+            },
+            {
+                "name": "액션 청킹",
+                "qa_layer": "경고만 -- self._base.delta_timestamps가 설정된 채로 visualize_episode()/plot_action_distribution()을 호출하면 경고(_warn_on_delta_timestamps_keys)",
+                "act_policy": "chunk_size=100 결정 (ACTConfig)",
+                "lerobot_train_cli": "자동 구성 -- chunk_size로부터 delta_timestamps를 만들어 순정 LeRobotDataset에 전달",
+                "status": "handled",
+                "status_label": "정상 처리(lerobot 표준 경로)",
+                "note": "실제 시퀀스 확장은 이 TeamRobotDataset이 아니라 lerobot-train이 직접 생성하는 순정 LeRobotDataset.__getitem__ 내부에서 일어납니다(20절).",
+            },
+            {
+                "name": "프레임 스태킹(관측 이력)",
+                "qa_layer": "관여 없음",
+                "act_policy": "n_obs_steps=1 강제 -- 그 외 값이면 ACTConfig 생성 시점에 ValueError",
+                "lerobot_train_cli": "관여 없음",
+                "status": "policy_constraint",
+                "status_label": "정책 자체 미지원(구조적 제약)",
+                "note": "ACT 정책 구현 자체가 여러 관측 프레임을 스택하는 걸 지원하지 않습니다 -- 이 파이프라인이 놓친 게 아니라 정책 선택(ACT)에 따른 제약입니다.",
+            },
+            {
+                "name": "센서 동기화",
+                "qa_layer": "관여 없음",
+                "act_policy": "관여 없음",
+                "lerobot_train_cli": "관여 없음",
+                "status": "not_applicable",
+                "status_label": "필요 자체가 없음",
+                "note": "run_teleop_real.py의 단일 제어 루프가 매 반복마다 action/observation.state/wrist_cam을 같은 순간에 한 번에 만들어내는 구조라, 비동기 센서 스트림을 사후에 정렬할 필요 자체가 없습니다.",
+            },
+        ]
+
+        return {"normalization": normalization, "items": preprocessing_items}

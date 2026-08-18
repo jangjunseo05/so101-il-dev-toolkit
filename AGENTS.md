@@ -37,7 +37,7 @@ lerobot 라이브러리 버전업에도 안정적. Subclass 방식(`LeRobotLance
 **절대 하지 말 것**: `lerobot` 패키지 소스코드(site-packages 내부)를 직접 수정하는 행위.
 필요한 커스터마이징은 전부 `TeamRobotDataset` 레이어에서 처리한다.
 
-## 4. Claude Code 작업 시 필수 지침
+## 4. Codex 작업 시 필수 지침
 - `LeRobotDataset`의 실제 속성/메서드는 **절대 추측하지 말 것**. 반드시 다음으로 직접 확인:
   - `python -c "from lerobot.datasets.lerobot_dataset import LeRobotDataset; help(LeRobotDataset)"`
   - 또는 설치된 패키지 소스 직접 열람 (`pip show lerobot`으로 경로 확인 후 `view`)
@@ -1539,7 +1539,7 @@ A↔B, 트랙 B↔학습) — 전부 실물 GPU + 실제 MuJoCo 창으로 end-to
   `checkpoints/`, `logs/`, `state/`, `train_runs/`, `*.log`,
   `config/local_settings.json`, `config/full_arm_calibration_leader.json`(물리
   리더암 전용 캘리브레이션 — 다른 로봇팔 값을 새 팀원이 그대로 물려받는
-  안전 문제로 판단해 제외), `graphify-out/`, `.claude/` 등 제외) + 첫 커밋
+  안전 문제로 판단해 제외), `graphify-out/`, `.Codex/` 등 제외) + 첫 커밋
   76개 파일. 작업 중 이전 세션에서 실수로 `C:\Users\USER\Desktop\.git`(바탕화면
   최상위)에 빈 저장소가 잘못 생성돼 있던 것을 발견(커밋 0개, 완전히
   비어있음 확인 후 삭제) — 올바른 위치(`so101_web/`)에 재초기화.
@@ -1642,7 +1642,7 @@ session_state에 저장된 이전 선택값이 새 옵션 목록에 없으면(�
 직접 확인해 검증함 — AppTest만으로는 `page_link` 관련 코드를 검증할 수
 없다는 게 이번에 새로 확인된 한계, 다음에도 참고).
 
-### 35-4. `dashboard-screenshot` 프로젝트 스킬 (신규, `.claude/skills/`)
+### 35-4. `dashboard-screenshot` 프로젝트 스킬 (신규, `.Codex/skills/`)
 `/run-skill-generator`는 모델이 직접 호출 못 하는 사용자 전용 명령이라
 (호출 시도 시 차단 확인됨), 대신 직접 스킬 파일을 작성. `.tools/screenshot/`
 (gitignore 대상, node_modules 포함)에 Playwright를 한 번만 설치해두면
@@ -1651,9 +1651,9 @@ session_state에 저장된 이전 선택값이 새 옵션 목록에 없으면(�
 인자로 받는 범용 스크립트, Streamlit 스피너(`[data-testid="stSpinner"]`)가
 사라질 때까지 최대 30초 대기 + 추가 버퍼(6초)로 QA/학습/추론 페이지의
 느린 인프로세스 계산(TeamRobotDataset 스캔)과 차트 렌더링을 둘 다
-커버하도록 이번 작업 중 점진적으로 개선함. `.claude/`를 통째로
+커버하도록 이번 작업 중 점진적으로 개선함. `.Codex/`를 통째로
 gitignore하면 이 스킬 파일 자체가 팀원에게 안 보이는 문제를 발견해
-`.claude/scheduled_tasks.lock`만 정확히 제외하도록 34절에서 이미 수정된
+`.Codex/scheduled_tasks.lock`만 정확히 제외하도록 34절에서 이미 수정된
 상태(재확인).
 
 ### 35-5. 홈 페이지 동적 CTA + 진행 표시: `dashboard/lib/next_action.py` (신규)
@@ -2307,7 +2307,7 @@ action/observation.state 라운드트립 `max_err=2.42e-08`(float32 정밀도
 39/40절 조사 결과를 대시보드에서 직접 확인할 수 있게, `TeamRobotDataset`에
 `describe_preprocessing()`을 추가하고 QA(②) 페이지 메타정보 섹션에서
 연결되는 별도 상세 페이지를 만들었다. **핵심 요구사항**: 이 페이지가
-CLAUDE.md 프로즈를 손으로 옮겨 적은 게 아니라, 코드에서 직접 읽어오는
+AGENTS.md 프로즈를 손으로 옮겨 적은 게 아니라, 코드에서 직접 읽어오는
 구조여야 함 — 아래처럼 구현.
 
 ### 42-1. `TeamRobotDataset.describe_preprocessing()`(신규)
@@ -2473,7 +2473,7 @@ AppTest로 검증 못 했던 부분(page_link가 있는 페이지의 정상 동�
 `switch_page()` 경로로 검증 가능하게 만든 셈 — 순수 회귀 없음을 넘어
 테스트 방법론 자체가 개선됨. (재사용 가능한 테스트 파일로 남기지는
 않음 — 이 프로젝트의 AppTest 검증은 지금까지 전부 1회성 스크립트 작성 →
-실행 → 결과를 CLAUDE.md에 기록 → 스크립트 삭제 패턴을 따름, 이번도 동일.)
+실행 → 결과를 AGENTS.md에 기록 → 스크립트 삭제 패턴을 따름, 이번도 동일.)
 
 **② `dashboard-screenshot` 스킬 호환성 — 무수정으로 정상 동작**:
 기존 `shot.js`(사이드바 링크 텍스트를 `getByText(exact:true)`로 찾아

@@ -17,6 +17,12 @@ config/full_arm_calibration_leader.json
 # Knowledge-graph tooling artifacts (irrelevant to teammates)
 graphify-out/
 
+# Dashboard screenshot verification tooling (node_modules + scratch PNGs) --
+# see .claude/skills/dashboard-screenshot/SKILL.md. Kept out of git since
+# it's a dev-only helper, not project source; each teammate who wants it
+# runs the one-time npm install themselves.
+.tools/
+
 # Python
 __pycache__/
 *.pyc
@@ -33,5 +39,7 @@ __pycache__/
 Thumbs.db
 .DS_Store
 
-# Claude Code local session/tooling state
-.claude/
+# Claude Code local session/tooling state -- but NOT .claude/skills/, which
+# holds project skills (e.g. dashboard-screenshot) meant to be shared with
+# teammates via clone, same as any other project doc.
+.claude/scheduled_tasks.lock

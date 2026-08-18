@@ -45,6 +45,7 @@ randomize_pick_object() 로직을 그대로 가져와 켜면 된다.
 
 import argparse
 import ctypes
+import sys
 import time
 import traceback
 from pathlib import Path
@@ -177,6 +178,9 @@ from lerobot.policies.factory import make_pre_post_processors
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SCENE_XML = str(PROJECT_ROOT / "robot_model" / "scene.xml")
 
+sys.path.insert(0, str(PROJECT_ROOT / "pipeline"))
+from camera_config import WRIST_IMAGE_HEIGHT, WRIST_IMAGE_WIDTH  # noqa: E402
+
 JOINT_NAMES = [
     "shoulder_pan",
     "shoulder_lift",
@@ -187,8 +191,8 @@ JOINT_NAMES = [
 ]
 
 WRIST_CAMERA = "wrist_cam"
-IMAGE_HEIGHT = 480
-IMAGE_WIDTH = 640
+IMAGE_HEIGHT = WRIST_IMAGE_HEIGHT
+IMAGE_WIDTH = WRIST_IMAGE_WIDTH
 
 CONTROL_HZ = 50  # 물리 스텝 주파수 (run_teleop_real.py와 동일)
 POLICY_HZ = 30  # 카메라 렌더 + policy 호출 주파수 (학습 데이터셋 fps와 동일, run_teleop_real.py의 RECORD_FPS와 동일 값)
@@ -410,6 +414,11 @@ def main():
                         )
                         for act_id, val in zip(follower_actuator_id, targets):
                             data.ctrl[act_id] = val
+                except AssertionError:
+                    # 해상도 불일치는 이번 프레임만 건너뛸 문제가 아니라 매 프레임
+                    # 계속 재발할 설정 오류이므로, 아래 except Exception과 달리
+                    # 삼키지 않고 세션 자체를 중단시킨다.
+                    raise
                 except Exception:
                     print("[run_inference_mujoco] policy 추론 중 오류(이번 프레임 건너뜀):", flush=True)
                     traceback.print_exc()
@@ -446,6 +455,20 @@ def _select_action(
     """
     renderer.update_scene(data, camera=WRIST_CAMERA)
     wrist_image = renderer.render()
+    # 41절: run_teleop_real.py와 동일한 pipeline/camera_config.py 상수를 쓰지만,
+    # 실제 렌더러 출력 셰이프는 각 스크립트의 mujoco.Renderer(height=..., width=...)
+    # 호출 인자에 달려있어 상수 공유만으로는 보장되지 않는다 -- 학습 시 정책이
+    # 본 해상도와 여기서 추론에 실제로 먹이는 해상도가 어긋나면 예외 없이 조용히
+    # 틀린 크기의 이미지를 정책에 넣게 되므로, 여기서 즉시 크게 실패하게 한다
+    # (뷰어 모드의 바깥 except Exception은 이 AssertionError를 삼키지 않고 다시
+    # 던지도록 별도 처리됨. headless 모드는 이 함수를 감싸는 try/except가 아예
+    # 없어 그대로 프로세스가 nonzero exit code로 죽는데, 이는 대시보드 트랙A
+    # 헬스체크의 기존 실패 판정과 그대로 맞아떨어진다, 33-4절).
+    assert wrist_image.shape[:2] == (IMAGE_HEIGHT, IMAGE_WIDTH), (
+        f"wrist_cam 렌더 shape {wrist_image.shape[:2]}가 pipeline/camera_config.py의 "
+        f"기대값 ({IMAGE_HEIGHT}, {IMAGE_WIDTH})과 다릅니다 -- 이 상태로 계속 추론하면 "
+        "학습 때와 다른 해상도의 이미지가 policy에 들어갑니다."
+    )
     if preview is not None:
         preview.update_image(wrist_image)
 

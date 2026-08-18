@@ -79,6 +79,17 @@ def get_qa_results(z_thresh_value: float = 3.0, z_thresh_delta: float = 3.0) -> 
     }
 
 
+@st.cache_data
+def get_preprocessing_description() -> dict:
+    """TeamRobotDataset.describe_preprocessing()의 결과를 그대로 반환.
+    CLAUDE.md 39/40절 내용을 페이지에 손으로 옮겨 적지 않고, 코드(정규화
+    통계는 실제 meta/stats.json, 6항목 표는 파이프라인 구조 설명)에서
+    직접 읽어오기 위한 얇은 래퍼 -- 다른 get_* 함수와 동일한 캐싱 패턴.
+    """
+    ds = _load_team_robot_dataset()
+    return ds.describe_preprocessing()
+
+
 def invalidate_dataset_caches() -> None:
     """데이터 수집 job이 끝나 데이터셋(episode/frame)이 바뀌었을 가능성이 있을
     때 호출 -- 디스크의 최신 상태를 다시 읽도록 관련 캐시를 전부 지운다.
@@ -89,6 +100,7 @@ def invalidate_dataset_caches() -> None:
     get_episode_lengths_df.clear()
     _load_team_robot_dataset.clear()
     get_qa_results.clear()
+    get_preprocessing_description.clear()
 
 
 @st.cache_data

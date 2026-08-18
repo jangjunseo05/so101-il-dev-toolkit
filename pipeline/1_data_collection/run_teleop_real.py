@@ -31,6 +31,7 @@ import argparse
 import ctypes
 import random
 import signal
+import sys
 import time
 import traceback
 from pathlib import Path
@@ -176,6 +177,9 @@ from lerobot.teleoperators.so_leader import SO101Leader, SOLeaderTeleopConfig
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SCENE_XML = str(PROJECT_ROOT / "robot_model" / "scene.xml")
 
+sys.path.insert(0, str(PROJECT_ROOT / "pipeline"))
+from camera_config import WRIST_IMAGE_HEIGHT, WRIST_IMAGE_WIDTH  # noqa: E402
+
 JOINT_NAMES = [
     "shoulder_pan",
     "shoulder_lift",
@@ -187,8 +191,8 @@ JOINT_NAMES = [
 GRIPPER_JOINT = "gripper"
 
 WRIST_CAMERA = "wrist_cam"
-IMAGE_HEIGHT = 480
-IMAGE_WIDTH = 640
+IMAGE_HEIGHT = WRIST_IMAGE_HEIGHT
+IMAGE_WIDTH = WRIST_IMAGE_WIDTH
 
 CONTROL_HZ = 50
 RECORD_FPS = 30
@@ -791,6 +795,18 @@ def main():
                             frame_accum -= frame_interval
                             renderer.update_scene(data, camera=WRIST_CAMERA)
                             wrist_image = renderer.render()
+                            # 41절: run_inference_mujoco.py도 같은 pipeline/camera_config.py
+                            # 상수를 쓰지만, 렌더러 자체의 실제 출력은 각 스크립트의
+                            # mujoco.Renderer(height=..., width=...) 호출 인자에 달려있어
+                            # 상수만 공유한다고 실제 셰이프까지 보장되진 않는다 -- 렌더러
+                            # 설정이 실수로 상수와 어긋나면 여기서 즉시 크게 실패하게 한다
+                            # (아래 except가 이 AssertionError는 삼키지 않고 다시 던짐).
+                            assert wrist_image.shape[:2] == (IMAGE_HEIGHT, IMAGE_WIDTH), (
+                                f"wrist_cam 렌더 shape {wrist_image.shape[:2]}가 pipeline/"
+                                f"camera_config.py의 기대값 ({IMAGE_HEIGHT}, {IMAGE_WIDTH})과 "
+                                "다릅니다 -- 이 상태로 계속 녹화하면 데이터셋에 잘못된 해상도의 "
+                                "프레임이 섞여 들어갑니다."
+                            )
 
                             if preview is not None:
                                 preview.update_image(wrist_image)
@@ -805,6 +821,11 @@ def main():
                                     }
                                 )
                                 episode_frame_count += 1
+                    except AssertionError:
+                        # 해상도 불일치는 이번 프레임만 건너뛰고 넘어갈 문제가 아니라
+                        # 매 프레임 계속 재발할 설정 오류이므로, 아래 except Exception과
+                        # 달리 삼키지 않고 세션 자체를 중단시킨다.
+                        raise
                     except Exception:
                         print("[run_teleop_real] 카메라 프레임 처리 중 오류(이번 프레임 건너뜀):", flush=True)
                         traceback.print_exc()
