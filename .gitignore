@@ -13,6 +13,7 @@ config/local_settings.json
 # physical arm silently applies wrong homing offsets/joint ranges. Each
 # teammate generates their own via docs/REAL_LEADER_SETUP.md step 4.
 config/full_arm_calibration_leader.json
+config/full_arm_calibration_follower.json
 
 # Knowledge-graph tooling artifacts (irrelevant to teammates)
 graphify-out/
