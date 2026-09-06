@@ -27,6 +27,11 @@ from lib import process_manager as pm
 from lib.theme import AQUA
 from lib.ui_components import get_logo_icon, render_brand_header, render_card_header
 
+# pipeline/camera_config.py의 스트리밍 포트 상수 재사용(§44) -- data_sources.py가
+# 이미 pipeline/2_qa를 sys.path에 넣는 것과 같은 패턴.
+sys.path.insert(0, str(ds.PROJECT_ROOT / "pipeline"))
+from camera_config import DATA_COLLECTION_STREAM_PORT  # noqa: E402
+
 st.set_page_config(page_title="① 데이터 수집", page_icon=get_logo_icon(), layout="wide")
 
 render_brand_header()
@@ -105,6 +110,22 @@ with st.container(border=True):
         c1.metric("상태", "🔴 실행 중")
         c2.metric("PID", job_status["pid"])
         c3.metric("경과 시간", f"{int(elapsed // 60)}분 {int(elapsed % 60)}초")
+
+        # 브라우저 내 라이브 스트리밍(§44) -- MuJoCo 네이티브 창을 대체하는 게
+        # 아니라 추가하는 것. S/X 키 녹화 조작은 여전히 네이티브 창에서만 가능하다
+        # (아래 안내문과 위 st.info 문구 참고). 서버가 아직 안 뜬 초기 수백ms
+        # 구간에는 브라우저가 이미지 로드 실패를 보여줄 수 있는데, <img>는 스스로
+        # 재시도하지 않으므로 몇 초 안에 안 뜨면 새로고침하라고 안내한다.
+        st.markdown("**📺 실시간 화면 (3인칭 뷰)**")
+        st.caption(
+            "MuJoCo 뷰어 창과는 별개로, 브라우저에서도 씬을 볼 수 있습니다(약 15fps). "
+            "S/X 키 녹화 조작은 여전히 뷰어 창에서 해야 합니다. 몇 초가 지나도 안 뜨면 새로고침하세요."
+        )
+        st.markdown(
+            f'<img src="http://127.0.0.1:{DATA_COLLECTION_STREAM_PORT}/stream" '
+            f'style="width:100%;max-width:640px;border-radius:4px;" />',
+            unsafe_allow_html=True,
+        )
 
         st_autorefresh(interval=2000, key="dc_log_autorefresh")
         log_text = pm.tail_log(job_status["log_path"], n_lines=200)

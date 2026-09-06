@@ -179,7 +179,15 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SCENE_XML = str(PROJECT_ROOT / "robot_model" / "scene.xml")
 
 sys.path.insert(0, str(PROJECT_ROOT / "pipeline"))
-from camera_config import WRIST_IMAGE_HEIGHT, WRIST_IMAGE_WIDTH  # noqa: E402
+from camera_config import (  # noqa: E402
+    INFERENCE_STREAM_PORT,
+    SCENE_STREAM_FPS,
+    SCENE_STREAM_HEIGHT,
+    SCENE_STREAM_WIDTH,
+    WRIST_IMAGE_HEIGHT,
+    WRIST_IMAGE_WIDTH,
+)
+from mjpeg_stream import SceneStreamServer  # noqa: E402
 
 JOINT_NAMES = [
     "shoulder_pan",
@@ -354,6 +362,27 @@ def main():
         renderer.close()
         return
 
+    # 브라우저 내 라이브 스트리밍용 3인칭 씬 렌더러(CLAUDE.md 44절). headless
+    # 모드는 위에서 이미 return했으므로 뷰어 모드에서만 생성된다 -- 헤드리스는
+    # 동기 헬스체크 용도라 지켜볼 "세션" 자체가 없어 스트리밍이 무의미함.
+    # wrist_cam renderer(정책 입력 경로)와는 완전히 분리된 별도 렌더러/카메라라
+    # 이 스트림이 실패해도 추론 자체에는 영향이 없다.
+    scene_renderer = mujoco.Renderer(model, height=SCENE_STREAM_HEIGHT, width=SCENE_STREAM_WIDTH)
+    scene_cam = mujoco.MjvCamera()
+    mujoco.mjv_defaultFreeCamera(model, scene_cam)
+
+    mjpeg_server = None
+    try:
+        mjpeg_server = SceneStreamServer(port=INFERENCE_STREAM_PORT)
+        mjpeg_server.start()
+        print(
+            f"[run_inference_mujoco] 브라우저 스트리밍: http://127.0.0.1:{INFERENCE_STREAM_PORT}/stream"
+        )
+    except Exception:
+        print("[run_inference_mujoco] 스트리밍 서버 시작 실패(추론은 계속 진행):", flush=True)
+        traceback.print_exc()
+        mjpeg_server = None
+
     try:
         preview = CameraPreviewWindow(IMAGE_WIDTH, IMAGE_HEIGHT, title=WRIST_CAMERA)
     except Exception:
@@ -381,6 +410,8 @@ def main():
     loop_dt = 1.0 / args.hz
     frame_interval = 1.0 / args.policy_hz
     frame_accum = 0.0
+    scene_frame_accum = 0.0
+    scene_frame_interval = 1.0 / SCENE_STREAM_FPS
 
     try:
         with mujoco.viewer.launch_passive(model, data, key_callback=key_callback) as viewer:
@@ -423,6 +454,23 @@ def main():
                     print("[run_inference_mujoco] policy 추론 중 오류(이번 프레임 건너뜀):", flush=True)
                     traceback.print_exc()
 
+                # 브라우저 스트리밍용 씬 렌더 -- policy 입력 경로(위 _select_action의
+                # wrist_cam 렌더)와는 독립된 accumulator/try-except를 쓴다. 순수
+                # 모니터링용이라 실패해도 삼키기만 하고 추론 자체를 중단시키지 않는다.
+                if mjpeg_server is not None:
+                    try:
+                        scene_frame_accum += loop_dt
+                        if scene_frame_accum >= scene_frame_interval:
+                            scene_frame_accum -= scene_frame_interval
+                            scene_renderer.update_scene(data, camera=scene_cam)
+                            mjpeg_server.publish_frame(scene_renderer.render())
+                    except Exception:
+                        print(
+                            "[run_inference_mujoco] 스트리밍 프레임 렌더 중 오류(이번 프레임 건너뜀, 추론엔 영향 없음):",
+                            flush=True,
+                        )
+                        traceback.print_exc()
+
                 for _ in range(substeps):
                     mujoco.mj_step(model, data)
                 viewer.sync()
@@ -432,6 +480,9 @@ def main():
                     time.sleep(time_until_next_step)
     finally:
         renderer.close()
+        scene_renderer.close()
+        if mjpeg_server is not None:
+            mjpeg_server.stop()
         if preview is not None:
             preview.close()
 

@@ -1,6 +1,7 @@
 # Runtime / machine-specific data — never shared between teammates
 data/
 checkpoints/
+checkpoints_bottle/
 logs/
 state/
 train_runs/

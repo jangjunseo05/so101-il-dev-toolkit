@@ -1,0 +1,69 @@
+<mujoco model="scene_bottle">
+    <!-- 병 파지·따르기(so101_demo_slots, dataset_registry.py의 bottle_pick_pour)
+         MuJoCo 추론 스모크테스트용 씬. scene.xml(사각형 블록 pick&place)을
+         복사해 만들었다 -- 원본은 건드리지 않고 독립 파일로 유지.
+
+         이 프로젝트의 정책은 실제 웹캠 사진으로 학습됐고, 여기서는 합성
+         렌더를 입력으로 준다 -- 실제 파지/따르기 성공을 재현하는 게 목적이
+         아니라 run_inference_mujoco_bottle.py 파이프라인이 에러 없이 돌고
+         action이 유한값으로 나오는지만 확인하는 용도(사용자 결정). 그래서
+         병/컵 형상과 카메라 배치는 실측 없이 "그럴듯한" 근사치만 쓴다. -->
+    <option cone="elliptic" impratio="10" noslip_iterations="5" />
+
+    <include file="so101_new_calib.xml" />
+
+    <visual>
+        <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0" />
+        <rgba haze="0.15 0.25 0.35 1" />
+        <global azimuth="160" elevation="-20" />
+    </visual>
+
+    <asset>
+        <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512"
+            height="3072" />
+        <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4"
+            rgb2="0.1 0.2 0.3"
+            markrgb="0.8 0.8 0.8" width="300" height="300" />
+        <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5"
+            reflectance="0.2" />
+    </asset>
+
+    <worldbody>
+        <light pos="0 0 3.5" dir="0 0 -1" directional="true" />
+        <geom name="floor" size="0 0 0.05" pos="0 0 0" type="plane" material="groundplane" />
+
+        <!-- 실제 nl_pick_pour.py 데이터 수집 대비: 실물 슬롯 좌표를 그대로
+             옮겨오지 않았다(팔로워 로봇 기준 서보각 웨이포인트라 이 MJCF의
+             world 좌표계로 변환하는 검증이 안 됨, ik.md 1절 참고). 대신
+             원본 scene.xml의 pick_object와 같은 x=0.20m(팔을 굽혀 뻗으면
+             닿는 대략적인 리치 거리)에 배치한다.
+
+             병 형상: 실린더로 근사(실제 병은 슬림한 원통형 플라스틱 병,
+             지름 ~3cm/높이 ~15cm). 그리퍼가 평행 집게가 아니라 스쿱+후크
+             구조라 원본 scene.xml의 2cm 정육면체 튜닝값(friction/condim/
+             solref/solimp)을 그대로 재사용 -- 같은 그리퍼 기하이므로 잡는
+             안정성 이슈도 동일할 것으로 보고 값을 새로 튜닝하지 않았다. -->
+        <body name="bottle" pos="0.20 0 0.075">
+            <freejoint name="bottle_free" />
+            <geom name="bottle_geom" type="cylinder" size="0.015 0.075"
+                rgba="0.2 0.55 0.3 1" mass="0.02" friction="2.5 0.3 0.15" condim="6"
+                solref="0.004 1" solimp="0.95 0.99 0.001" />
+        </body>
+
+        <!-- 따르기 대상 컵. 실제로는 위가 뚫린 용기지만 원시 도형(cylinder)만으로
+             속이 빈 형상을 만들 수 없어, place_plate와 동일하게 자유관절 없는
+             얕은 원판(충돌만 있음)으로 근사한다 -- "여기로 따른다"는 위치
+             표식 이상의 물리적 의미는 없다(액체 시뮬레이션 없음). -->
+        <body name="cup" pos="0.20 0.15 0.003">
+            <geom name="cup_geom" type="cylinder" size="0.03 0.003"
+                rgba="0.7 0.85 0.9 1" friction="0.6 0.005 0.0001" />
+        </body>
+
+        <!-- 3인칭 참고용 정적 카메라(front_cam). 학습 데이터의 실제 front
+             카메라 외부 파라미터를 그대로 옮긴 게 아니다(실측 캘리브레이션
+             없음) -- mode="targetbody"로 병을 항상 바라보게만 고정해, 씬
+             구성이 바뀌어도(병 위치 조정 등) 다시 각도를 계산할 필요가
+             없게 했다. -->
+        <camera name="front_cam" pos="0.55 0.0 0.35" mode="targetbody" target="bottle" />
+    </worldbody>
+</mujoco>

@@ -1,0 +1,56 @@
+dataset:
+  repo_id: so101_demo_slots
+  # 이 절대경로는 이 컴퓨터 전용 -- 대시보드의 "새 학습 시작"(dashboard/pages/3_ACT_학습.py)이
+  # 실행 시 --dataset.root=<dataset_registry.py의 bottle_pick_pour.dataset_root>로
+  # 항상 덮어쓰므로 대시보드 경로에서는 무시된다. 터미널에서
+  # `lerobot-train --config_path=config/train_bottle_config.yaml`을 직접
+  # 실행할 경우에만 아래 값이 그대로 쓰이므로, 그 전에 자신의 프로젝트 폴더
+  # 기준 경로로 고쳐서 쓸 것.
+  root: C:/Users/USER/Desktop/so101_web/data/so101_demo_slots
+  # 61 episodes 중 episode 30만 제외(24 frames, 근접-정지 상태로 즉시
+  # 시작/종료된 무효 데모로 확인 -- 다른 프로젝트의 QA 검증 세션에서
+  # 이미 확인된 사실, 이 저장소로 데이터를 옮겨오면서 그대로 반영).
+  episodes: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+             20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 31, 32, 33, 34, 35, 36, 37, 38,
+             39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56,
+             57, 58, 59, 60]
+
+policy:
+  type: act
+  device: cuda
+  push_to_hub: false
+  normalization_mapping:
+    # 블록 데이터셋(train_main_run_config.yaml)과 다르게 VISUAL도 MEAN_STD --
+    # 이 데이터셋은 MuJoCo 렌더가 아니라 실제 웹캠으로 찍은 자연 이미지라
+    # (front+wrist 320x240) 픽셀 분산이 낮지 않다. 다른 프로젝트에서 이미
+    # 이 설정으로 학습해 실물 로봇에서 검증된 체크포인트(act_demo_slots_v2)를
+    # 냈던 조합을 그대로 재사용한다.
+    VISUAL: MEAN_STD
+    STATE: MEAN_STD
+    ACTION: MEAN_STD
+
+output_dir: ./train_bottle_run_output
+job_name: bottle_run
+seed: 1000
+
+num_workers: 8
+batch_size: 16
+
+# 다른 프로젝트에서 이미 이 설정(2카메라, 320x240, 61 episodes)으로 30000
+# step까지 학습해 성공적으로 검증한 이력이 있어(act_demo_slots_v2) 그
+# 체크포인트 간격을 그대로 재사용한다.
+steps: 30000
+log_freq: 50
+save_freq: 2500
+
+# lerobot-train의 eval_freq/eval.*는 gym 환경(cfg.env) 기반 rollout 평가
+# 전용으로, MuJoCo 씬은 등록된 gym env가 아니라 사실상 무시된다(블록
+# 데이터셋 설정과 동일한 이유, train_main_run_config.yaml 참고).
+eval_freq: 0
+
+wandb:
+  enable: true
+  project: so101-bottle-pickpour-act
+  # WANDB_API_KEY 미설정 시 online 모드가 인증 실패로 학습을 멈추게 할 수
+  # 있어 offline로 강제(블록 데이터셋 설정과 동일한 이유).
+  mode: offline

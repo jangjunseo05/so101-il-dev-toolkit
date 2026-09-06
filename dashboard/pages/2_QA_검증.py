@@ -20,6 +20,7 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from lib import data_sources as ds
+from lib import dataset_registry
 from lib import qa_snapshot
 from lib.ui_components import get_logo_icon, render_brand_header, render_card_header
 
@@ -35,6 +36,17 @@ render_brand_header()
 st.title("② QA & 검증")
 st.caption("`TeamRobotDataset` 커스텀 통계 · 아웃라이어 탐지 · 무결성 검증 (`team_robot_dataset.py`)")
 
+# 데이터셋 선택 -- 다른 페이지(③④)와 st.session_state로 선택을 공유한다.
+_dataset_options = dataset_registry.dataset_options()
+st.session_state.setdefault("selected_dataset_id", dataset_registry.DEFAULT_DATASET_ID)
+_current_id = st.session_state["selected_dataset_id"]
+_labels = list(_dataset_options.keys())
+_current_label = next(label for label, did in _dataset_options.items() if did == _current_id)
+_selected_label = st.selectbox("데이터셋", options=_labels, index=_labels.index(_current_label))
+dataset_id = _dataset_options[_selected_label]
+st.session_state["selected_dataset_id"] = dataset_id
+profile = dataset_registry.get_profile(dataset_id)
+
 # z_thresh 기본값을 위젯 렌더보다 먼저 세션 상태에 심어둔다 -- 액션 카드
 # (스냅샷 저장 버튼)가 설정 카드보다 위에 오지만, 저장에 쓰는 qa 결과는
 # 설정 카드의 z_thresh 입력값에 의존한다. key로 바인딩된 위젯은 프레임워크가
@@ -47,6 +59,7 @@ with st.spinner("TeamRobotDataset 분석 실행 중..."):
     qa = ds.get_qa_results(
         z_thresh_value=st.session_state["qa_z_thresh_value"],
         z_thresh_delta=st.session_state["qa_z_thresh_delta"],
+        dataset_id=dataset_id,
     )
 
 # 1. 행동(action) -- 이 페이지의 유일한 실행 버튼
@@ -58,7 +71,7 @@ with st.container(border=True):
         "데이터셋 자체는 전혀 건드리지 않고 인덱스 구성만 JSON으로 남깁니다."
     )
     if st.button("📌 이 결과를 학습용으로 확정", type="primary"):
-        saved_path = qa_snapshot.save_snapshot(qa, repo_id=ds.REPO_ID, root=str(ds.DATASET_ROOT))
+        saved_path = qa_snapshot.save_snapshot(qa, repo_id=profile["repo_id"], root=str(profile["dataset_root"]))
         st.success(f"저장했습니다: {saved_path.name}")
         st.rerun()
 
@@ -104,7 +117,8 @@ with st.container(border=True):
     st.write(f"val_episodes = {split['val_episodes']}")
 
 # 3. 결과(results) -- 저장된 스냅샷이 있을 때만, "완료" 요약 하나만
-snapshots = qa_snapshot.list_snapshots()
+# 다른 데이터셋의 스냅샷과 섞이면 "최신"의 의미가 깨지므로 repo_id로 필터링.
+snapshots = [s for s in qa_snapshot.list_snapshots() if s.get("repo_id") == profile["repo_id"]]
 if snapshots:
     _latest = snapshots[0]
     with st.container(border=True):
@@ -146,63 +160,69 @@ with st.expander("(자세히 보기) 코드 구조 · 이상치 필터링 사례
         }
     )
 
-    st.subheader("실제로 있었던 이상치 필터링 사례")
-    with st.container(border=True):
-        st.markdown("#### wrist_roll clip 진단·수정 (CLAUDE.md 23절)")
-        st.write(
-            "20-episode 데이터에서 `wrist_roll` std가 다른 관절보다 28배 작다는 게 발견됨 → 진단 결과 "
-            "task 특성이 아니라 **leader 실측 캘리브레이션 range가 follower MJCF 모델 range보다 넓어서 "
-            "생기는 clip**으로 판명 (1:1 직접 매핑의 구조적 문제)."
+    if dataset_id == "block_pickplace":
+        st.subheader("실제로 있었던 이상치 필터링 사례")
+        with st.container(border=True):
+            st.markdown("#### wrist_roll clip 진단·수정 (CLAUDE.md 23절)")
+            st.write(
+                "20-episode 데이터에서 `wrist_roll` std가 다른 관절보다 28배 작다는 게 발견됨 → 진단 결과 "
+                "task 특성이 아니라 **leader 실측 캘리브레이션 range가 follower MJCF 모델 range보다 넓어서 "
+                "생기는 clip**으로 판명 (1:1 직접 매핑의 구조적 문제)."
+            )
+            b1, b2 = st.columns(2)
+            b1.metric("수정 전 (재캘리브레이션 전)", "16 / 20 episodes", "wrist_roll 하한 고정", delta_color="inverse")
+            b2.metric("수정 후 (비례 스케일링 적용)", "0 / 28 episodes", "clip 프레임 0%")
+            img_path = ds.get_asset_path("wrist_roll_clip_diagnosis.png", dataset_id=dataset_id)
+            if img_path.exists():
+                st.image(str(img_path), caption="wrist_roll clip 진단 (수정 전)")
+
+        with st.container(border=True):
+            st.markdown("#### episode 11 제외 (CLAUDE.md 24-3절)")
+            st.write(
+                "값/delta 기준 아웃라이어 0건, 최단 프레임(225), wrist_roll range 0.00°로 완전 무변화 — "
+                "사용자 확인 결과 **S 키 오조작으로 인한 무효 데모**로 판명되어 학습 시 `episodes` 파라미터로 제외."
+            )
+
+        st.subheader("시각화 산출물")
+        img_cols = st.columns(2)
+        for i, (fname, caption) in enumerate(
+            [
+                ("action_distribution.png", "관절별 값 분포 히스토그램"),
+                ("episode_0_trajectory_combined.png", "episode 0 궤적 + 값/delta 아웃라이어 오버레이"),
+                ("ep0_new17_trajectory.png", "재캘리브레이션 후 17-episode 데이터 (episode 0)"),
+                ("ep9_new17_trajectory.png", "재캘리브레이션 후 17-episode 데이터 (episode 9)"),
+            ]
+        ):
+            p = ds.get_asset_path(fname, dataset_id=dataset_id)
+            if p.exists():
+                with img_cols[i % 2]:
+                    st.image(str(p), caption=caption)
+
+        # 주의: st.expander는 다른 expander 안에 중첩할 수 없다(Streamlit 제약) --
+        # 이 섹션이 원래 독립 expander였으나, 지금은 위 메타정보 expander 안에
+        # 있으므로 일반 섹션(subheader + 상시 표시)으로 바꿨다.
+        st.subheader("⚠️ 참고용: 예전 outlier_report.md (구식 — 시뮬레이션 2-episode 데이터 대상)")
+        st.warning(
+            "이 리포트는 학습에 쓴 `so101_teleop_real`이 아니라 훨씬 이전의 `so101_teleop`(시뮬레이션, "
+            "2 episodes/109 frames) 데이터 대상입니다. 위 '설정' 카드의 실시간 수치가 현재 데이터 기준 최신입니다."
         )
-        b1, b2 = st.columns(2)
-        b1.metric("수정 전 (재캘리브레이션 전)", "16 / 20 episodes", "wrist_roll 하한 고정", delta_color="inverse")
-        b2.metric("수정 후 (비례 스케일링 적용)", "0 / 28 episodes", "clip 프레임 0%")
-        img_path = ds.get_asset_path("wrist_roll_clip_diagnosis.png")
-        if img_path.exists():
-            st.image(str(img_path), caption="wrist_roll clip 진단 (수정 전)")
-
-    with st.container(border=True):
-        st.markdown("#### episode 11 제외 (CLAUDE.md 24-3절)")
-        st.write(
-            "값/delta 기준 아웃라이어 0건, 최단 프레임(225), wrist_roll range 0.00°로 완전 무변화 — "
-            "사용자 확인 결과 **S 키 오조작으로 인한 무효 데모**로 판명되어 학습 시 `episodes` 파라미터로 제외."
+        report_path = ds.get_asset_path("outlier_report.md", dataset_id=dataset_id)
+        if report_path.exists():
+            # 이 파일이 334KB나 돼서, 예전엔 접힌 상태에서도 st.markdown()이 매
+            # rerun마다(위젯 클릭 한 번에도) 무조건 다시 파싱/렌더링돼 페이지가
+            # 간헐적으로 멈추는 원인이었다 -- Streamlit은 접힌 영역도 "숨기기"만
+            # 할 뿐 안의 코드는 그대로 실행한다. 버튼으로 명시적으로 요청할 때만
+            # 읽고 렌더링하도록 바꿔서, 안 열어보면 이 비용 자체가 발생하지 않게 함.
+            st.session_state.setdefault("qa_show_old_report", False)
+            if st.button("📄 전체 내용 보기/숨기기", key="qa_toggle_old_report"):
+                st.session_state["qa_show_old_report"] = not st.session_state["qa_show_old_report"]
+            if st.session_state["qa_show_old_report"]:
+                st.markdown(_load_old_report_text(report_path))
+    else:
+        st.caption(
+            f"'{profile['label']}' 데이터셋은 아직 이상치 사례/시각화 산출물이 기록되지 않았습니다 — "
+            "위 '설정' 카드의 실시간 수치가 이 데이터셋에 대한 유일한 QA 근거입니다."
         )
-
-    st.subheader("시각화 산출물")
-    img_cols = st.columns(2)
-    for i, (fname, caption) in enumerate(
-        [
-            ("action_distribution.png", "관절별 값 분포 히스토그램"),
-            ("episode_0_trajectory_combined.png", "episode 0 궤적 + 값/delta 아웃라이어 오버레이"),
-            ("ep0_new17_trajectory.png", "재캘리브레이션 후 17-episode 데이터 (episode 0)"),
-            ("ep9_new17_trajectory.png", "재캘리브레이션 후 17-episode 데이터 (episode 9)"),
-        ]
-    ):
-        p = ds.get_asset_path(fname)
-        if p.exists():
-            with img_cols[i % 2]:
-                st.image(str(p), caption=caption)
-
-    # 주의: st.expander는 다른 expander 안에 중첩할 수 없다(Streamlit 제약) --
-    # 이 섹션이 원래 독립 expander였으나, 지금은 위 메타정보 expander 안에
-    # 있으므로 일반 섹션(subheader + 상시 표시)으로 바꿨다.
-    st.subheader("⚠️ 참고용: 예전 outlier_report.md (구식 — 시뮬레이션 2-episode 데이터 대상)")
-    st.warning(
-        "이 리포트는 학습에 쓴 `so101_teleop_real`이 아니라 훨씬 이전의 `so101_teleop`(시뮬레이션, "
-        "2 episodes/109 frames) 데이터 대상입니다. 위 '설정' 카드의 실시간 수치가 현재 데이터 기준 최신입니다."
-    )
-    report_path = ds.get_asset_path("outlier_report.md")
-    if report_path.exists():
-        # 이 파일이 334KB나 돼서, 예전엔 접힌 상태에서도 st.markdown()이 매
-        # rerun마다(위젯 클릭 한 번에도) 무조건 다시 파싱/렌더링돼 페이지가
-        # 간헐적으로 멈추는 원인이었다 -- Streamlit은 접힌 영역도 "숨기기"만
-        # 할 뿐 안의 코드는 그대로 실행한다. 버튼으로 명시적으로 요청할 때만
-        # 읽고 렌더링하도록 바꿔서, 안 열어보면 이 비용 자체가 발생하지 않게 함.
-        st.session_state.setdefault("qa_show_old_report", False)
-        if st.button("📄 전체 내용 보기/숨기기", key="qa_toggle_old_report"):
-            st.session_state["qa_show_old_report"] = not st.session_state["qa_show_old_report"]
-        if st.session_state["qa_show_old_report"]:
-            st.markdown(_load_old_report_text(report_path))
 
     st.subheader("저장된 스냅샷 이력 (전체)")
     if snapshots:

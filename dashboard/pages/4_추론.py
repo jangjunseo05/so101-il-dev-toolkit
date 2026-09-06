@@ -35,17 +35,44 @@ from streamlit_autorefresh import st_autorefresh
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from lib import data_sources as ds
+from lib import dataset_registry
 from lib import process_manager as pm
 from lib import training_run as tr
 from lib.ui_components import get_logo_icon, render_brand_header, render_card_header
+
+# pipeline/camera_config.py의 스트리밍 포트 상수 재사용(§44) -- 1_데이터_수집.py와
+# 동일 패턴(data_sources.py가 이미 pipeline/2_qa를 sys.path에 넣는 것도 같은 방식).
+sys.path.insert(0, str(ds.PROJECT_ROOT / "pipeline"))
+from camera_config import INFERENCE_STREAM_PORT  # noqa: E402
 
 st.set_page_config(page_title="④ 추론", page_icon=get_logo_icon(), layout="wide")
 
 render_brand_header()
 
+# 데이터셋 선택 -- ②/③ 페이지와 st.session_state로 선택을 공유한다. 데이터셋마다
+# 추론 스크립트/씬(worldbody)/카메라 구성이 완전히 다르므로(1카메라 640x480 vs
+# 2카메라 320x240) 체크포인트뿐 아니라 실행할 스크립트 자체가 바뀐다.
+_dataset_options = dataset_registry.dataset_options()
+st.session_state.setdefault("selected_dataset_id", dataset_registry.DEFAULT_DATASET_ID)
+_current_id = st.session_state["selected_dataset_id"]
+_ds_labels = list(_dataset_options.keys())
+_current_label = next(label for label, did in _dataset_options.items() if did == _current_id)
+_selected_label = st.selectbox("데이터셋", options=_ds_labels, index=_ds_labels.index(_current_label))
+dataset_id = _dataset_options[_selected_label]
+st.session_state["selected_dataset_id"] = dataset_id
+profile = dataset_registry.get_profile(dataset_id)
+
+if dataset_id == "bottle_pick_pour":
+    st.warning(
+        "이 데이터셋은 실제 웹캠 사진으로 학습됐습니다 — MuJoCo 렌더(합성 이미지)를 입력으로 받으면 "
+        "학습 때와 이미지 도메인이 완전히 달라집니다. 여기서 확인하는 건 '집기/따르기를 성공하는지'가 "
+        "아니라 '파이프라인이 에러 없이 돌고 액션 값이 정상 범위인지'뿐입니다(스모크테스트).",
+        icon="⚠️",
+    )
+
 STAGE = "inference"
-INFERENCE_SCRIPT = ds.PROJECT_ROOT / "pipeline" / "4_inference" / "run_inference_mujoco.py"
-DEFAULT_CHECKPOINT = ds.PROJECT_ROOT / "checkpoints" / "010000" / "pretrained_model"
+INFERENCE_SCRIPT = profile["inference_script"]
+DEFAULT_CHECKPOINT = profile["default_checkpoint"]
 
 
 def _resolve_checkpoint_dir(output_dir: Path) -> Path | None:
@@ -74,18 +101,21 @@ def _resolve_checkpoint_dir(output_dir: Path) -> Path | None:
 
 def _checkpoint_options() -> dict[str, str]:
     """드롭다운에 쓸 {표시 라벨: 체크포인트 디렉터리 경로} -- ③에서 완료된
-    학습 run들을 우선 보여주고(training_run.py 재사용, 신규 조회 로직
-    작성 안 함), 완료된 run이 하나도 없으면 스크립트 자체의 기본 체크포인트로
-    폴백한다.
+    학습 run들을(선택된 dataset_id로 필터링) 우선 보여주고, 완료된 run이
+    하나도 없으면 이 데이터셋의 기본 체크포인트로 폴백한다.
+
+    dataset_id로 필터링하는 이유: 병/블록 체크포인트는 서로 다른 카메라
+    피처 키·해상도를 기대해서 잘못 고르면 추론 스크립트가 곧바로 에러를
+    낸다(옆 페이지의 데이터셋 선택과 항상 일치시켜야 함).
     """
     options = {}
-    for run in tr.list_completed_runs():
+    for run in tr.list_completed_runs(dataset_id=dataset_id):
         ckpt_dir = _resolve_checkpoint_dir(Path(run["output_dir"]))
         if ckpt_dir is not None:
             step = run.get("last_checkpoint_step", "?")
             options[f"{run['run_id']} (step {step})"] = str(ckpt_dir)
     if DEFAULT_CHECKPOINT.is_dir():
-        options["기본 체크포인트 (checkpoints/010000)"] = str(DEFAULT_CHECKPOINT)
+        options[f"기본 체크포인트 ({DEFAULT_CHECKPOINT.parent.parent.name}/{DEFAULT_CHECKPOINT.parent.name})"] = str(DEFAULT_CHECKPOINT)
     return options
 
 
@@ -236,6 +266,19 @@ with st.container(border=True):
             c2.metric("PID", job_status["pid"])
             c3.metric("경과 시간", f"{int(elapsed // 60)}분 {int(elapsed % 60)}초")
 
+            # 브라우저 내 라이브 스트리밍(§44) -- ①(데이터 수집)과 동일 패턴.
+            # R 키 episode 리셋은 여전히 네이티브 뷰어 창에서만 가능하다.
+            st.markdown("**📺 실시간 화면 (3인칭 뷰)**")
+            st.caption(
+                "MuJoCo 뷰어 창과는 별개로, 브라우저에서도 씬을 볼 수 있습니다(약 15fps). "
+                "R 키 episode 리셋은 여전히 뷰어 창에서 해야 합니다. 몇 초가 지나도 안 뜨면 새로고침하세요."
+            )
+            st.markdown(
+                f'<img src="http://127.0.0.1:{INFERENCE_STREAM_PORT}/stream" '
+                f'style="width:100%;max-width:640px;border-radius:4px;" />',
+                unsafe_allow_html=True,
+            )
+
             st_autorefresh(interval=2000, key="inference_log_autorefresh")
             log_text = pm.tail_log(job_status["log_path"], n_lines=200)
             st.text_area("실시간 로그 (2초마다 자동 갱신)", value=log_text, height=300, key="inference_log_area")
@@ -276,22 +319,23 @@ with st.container(border=True):
                     "R 키: episode 리셋. 뷰어 창을 닫거나 위 버튼으로 세션을 끝낼 수 있습니다."
                 )
 
-# 2. 결과(results) -- 정적/과거 기록, 트랙 A의 매번 다른 결과와 혼동되지 않도록
-# 제목에 "이전 세션 기록"을 명시(트랙 A 결과는 카드화하지 않고 인라인 유지)
-with st.container(border=True):
-    render_card_header("📋", "헤드리스 검증 결과 (이전 세션 기록)", "success")
-    st.caption("`python run_inference_mujoco.py --headless --duration 5` 실행 결과 — 위 트랙 A로 언제든 재현 가능")
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("물리 스텝", "2510회", "5초 분량")
-    c2.metric("policy 호출", "150회", "30Hz × 5초")
-    c3.metric("action dtype", "float32", "끝까지 유지")
-    c4.metric("NaN/Inf", "0건", "전부 유한값")
+if dataset_id == "block_pickplace":
+    # 2. 결과(results) -- 정적/과거 기록, 트랙 A의 매번 다른 결과와 혼동되지 않도록
+    # 제목에 "이전 세션 기록"을 명시(트랙 A 결과는 카드화하지 않고 인라인 유지)
+    with st.container(border=True):
+        render_card_header("📋", "헤드리스 검증 결과 (이전 세션 기록)", "success")
+        st.caption("`python run_inference_mujoco.py --headless --duration 5` 실행 결과 — 위 트랙 A로 언제든 재현 가능")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("물리 스텝", "2510회", "5초 분량")
+        c2.metric("policy 호출", "150회", "30Hz × 5초")
+        c3.metric("action dtype", "float32", "끝까지 유지")
+        c4.metric("NaN/Inf", "0건", "전부 유한값")
 
-# 3. 메타정보(접힘) -- 코드 구조 + 실행 파라미터
-with st.expander("(자세히 보기) 코드 구조 · 실행 파라미터 "):
-    st.subheader("코드 구조 — 관측치 → 액션 루프")
-    st.markdown(
-        """
+    # 3. 메타정보(접힘) -- 코드 구조 + 실행 파라미터
+    with st.expander("(자세히 보기) 코드 구조 · 실행 파라미터 "):
+        st.subheader("코드 구조 — 관측치 → 액션 루프")
+        st.markdown(
+            """
 `leader.get_action()` 자리를 `ACTPolicy.select_action()`으로 교체한 구조입니다:
 
 ```text
@@ -303,11 +347,33 @@ MuJoCo에서 observation(qpos, wrist_cam 렌더) 읽기
   → MuJoCo data.ctrl에 적용 (clip 후 float32로 재캐스팅 — dtype 승격 버그 방지)
 ```
 """
-    )
+        )
 
-    st.subheader("실행 파라미터")
-    p1, p2, p3, p4 = st.columns(4)
-    p1.metric("POLICY_HZ", "30", help="카메라 렌더 + policy 호출 주파수 (학습 데이터셋 fps와 동일)")
-    p2.metric("CONTROL_HZ", "50", help="MuJoCo 물리 스텝 주파수")
-    p3.metric("chunk_size", "100")
-    p4.metric("n_action_steps", "100")
+        st.subheader("실행 파라미터")
+        p1, p2, p3, p4 = st.columns(4)
+        p1.metric("POLICY_HZ", "30", help="카메라 렌더 + policy 호출 주파수 (학습 데이터셋 fps와 동일)")
+        p2.metric("CONTROL_HZ", "50", help="MuJoCo 물리 스텝 주파수")
+        p3.metric("chunk_size", "100")
+        p4.metric("n_action_steps", "100")
+else:
+    with st.expander("(자세히 보기) 코드 구조"):
+        st.markdown(
+            """
+`run_inference_mujoco_bottle.py`는 카메라가 2대(front+wrist, 320x240)라는 점만
+다르고 나머지 루프는 블록 데이터셋용 스크립트와 동일합니다:
+
+```text
+MuJoCo에서 observation(qpos, front_cam+wrist_cam 렌더) 읽기
+  → {"observation.state": tensor,
+     "observation.images.front": tensor, "observation.images.wrist": tensor}
+  → preprocessor(obs)          # 체크포인트의 정규화 설정 자동 적용 (VISUAL=MEAN_STD)
+  → policy.select_action(obs)  # action chunking 내부에서 자동 처리
+  → postprocessor(action)
+  → MuJoCo data.ctrl에 적용
+```
+
+⚠️ 학습 이미지는 실제 웹캠 사진, 추론 이미지는 MuJoCo 합성 렌더라 도메인이
+다릅니다 — action이 유한값으로 나오는지(파이프라인 정상 동작)만 보장하고,
+실제로 병을 집거나 따르는 데 성공하는 것은 기대하지 않습니다.
+"""
+        )

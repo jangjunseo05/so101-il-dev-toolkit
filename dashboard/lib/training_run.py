@@ -44,11 +44,16 @@ def create_run(
     output_dir: str,
     dataset_snapshot_path: str | None,
     cmd: list[str],
+    dataset_id: str | None = None,
 ) -> dict:
     """새 학습 실행 기록을 만든다. "이어서 학습"은 새 레코드를 만들지 않고
     같은 run_id의 기존 레코드를 `mark_running()`으로 재사용한다 -- output_dir이
     그대로 이어지는 같은 run이기 때문(CLAUDE.md 31-1절: resume은 같은
     output_dir에 계속 저장됨).
+
+    `dataset_id`는 병 데이터셋 추가(dataset_registry.py) 이후 생긴 필드 --
+    이 필드가 없는(레지스트리 도입 전에 만들어진) 기존 레코드는
+    `list_completed_runs(dataset_id=...)`가 "block_pickplace"로 취급한다.
     """
     TRAINING_RUNS_DIR.mkdir(parents=True, exist_ok=True)
     record = {
@@ -56,6 +61,7 @@ def create_run(
         "output_dir": output_dir,
         "dataset_snapshot_path": dataset_snapshot_path,
         "cmd": cmd,
+        "dataset_id": dataset_id,
         "status": "running",
         "last_checkpoint_step": None,
         "started_at": time.time(),
@@ -110,14 +116,28 @@ def list_runs() -> list[dict]:
     return runs
 
 
-def list_interrupted_runs() -> list[dict]:
-    """'이어서 학습' 후보 목록 -- status=interrupted인 run만."""
-    return [r for r in list_runs() if r.get("status") == "interrupted"]
+def _matches_dataset(run: dict, dataset_id: str | None) -> bool:
+    if dataset_id is None:
+        return True
+    # 레지스트리 도입 전 기록은 dataset_id 필드가 없음 -- 그 시절엔
+    # block_pickplace 데이터셋밖에 없었으므로 그걸로 취급한다.
+    return run.get("dataset_id", "block_pickplace") == dataset_id
 
 
-def list_completed_runs() -> list[dict]:
-    """추론(④) 페이지의 체크포인트 선택 후보 목록 -- status=completed인 run만."""
-    return [r for r in list_runs() if r.get("status") == "completed"]
+def list_interrupted_runs(dataset_id: str | None = None) -> list[dict]:
+    """'이어서 학습' 후보 목록 -- status=interrupted인 run만.
+
+    dataset_id를 주면 그 데이터셋으로 시작된 run만 필터링한다(병/블록
+    체크포인트가 서로 다른 씬/카메라를 기대하므로 섞이면 안 됨).
+    """
+    return [r for r in list_runs() if r.get("status") == "interrupted" and _matches_dataset(r, dataset_id)]
+
+
+def list_completed_runs(dataset_id: str | None = None) -> list[dict]:
+    """추론(④) 페이지의 체크포인트 선택 후보 목록 -- status=completed인 run만.
+
+    dataset_id를 주면 그 데이터셋으로 시작된 run만 필터링한다."""
+    return [r for r in list_runs() if r.get("status") == "completed" and _matches_dataset(r, dataset_id)]
 
 
 def update_last_checkpoint_step(run_id: str, log_text: str) -> int | None:

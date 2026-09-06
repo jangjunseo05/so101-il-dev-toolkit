@@ -27,6 +27,7 @@ from streamlit_autorefresh import st_autorefresh
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from lib import data_sources as ds
+from lib import dataset_registry
 from lib import process_manager as pm
 from lib import qa_snapshot
 from lib import training_run as tr
@@ -37,8 +38,19 @@ st.set_page_config(page_title="③ ACT 학습", page_icon=get_logo_icon(), layou
 
 render_brand_header()
 
+# 데이터셋 선택 -- ②/④ 페이지와 st.session_state로 선택을 공유한다.
+_dataset_options = dataset_registry.dataset_options()
+st.session_state.setdefault("selected_dataset_id", dataset_registry.DEFAULT_DATASET_ID)
+_current_id = st.session_state["selected_dataset_id"]
+_ds_labels = list(_dataset_options.keys())
+_current_label = next(label for label, did in _dataset_options.items() if did == _current_id)
+_selected_label = st.selectbox("데이터셋", options=_ds_labels, index=_ds_labels.index(_current_label))
+dataset_id = _dataset_options[_selected_label]
+st.session_state["selected_dataset_id"] = dataset_id
+profile = dataset_registry.get_profile(dataset_id)
+
 STAGE = "training"
-BASE_TRAIN_CONFIG = ds.PROJECT_ROOT / "config" / "train_main_run_config.yaml"
+BASE_TRAIN_CONFIG = profile["train_config"]
 
 # tqdm 진행률 라인(예: "Training:  45%|####      | 4500/10000 [02:15<02:45,  3.32it/s]")
 # 에서 "4500/10000 ["만 뽑는다. 정교한 파싱이 아니라 실패하면 그냥 None을
@@ -150,9 +162,10 @@ action_blocked = (not job_status["running"]) and conflict is not None
 # 발견됨) -- 위젯을 렌더하기 전에 session_state 기본값을 미리 심어두고
 # key 바인딩으로 읽는 방식으로 처음부터 이렇게 구현한다.
 st.session_state.setdefault("training_new_job_name", "main_run")
-_snapshots = qa_snapshot.list_snapshots()
+# 다른 데이터셋의 스냅샷/중단 run과 섞이지 않도록 선택된 데이터셋으로 필터링.
+_snapshots = [s for s in qa_snapshot.list_snapshots() if s.get("repo_id") == profile["repo_id"]]
 _latest_snapshot = _snapshots[0] if _snapshots else None
-_interrupted_runs = tr.list_interrupted_runs()
+_interrupted_runs = tr.list_interrupted_runs(dataset_id=dataset_id)
 _resume_options: dict[str, dict] = {}
 _resume_labels: list[str] = []
 if _interrupted_runs:
@@ -229,7 +242,7 @@ with st.container(border=True):
                     f"--config_path={BASE_TRAIN_CONFIG}",
                     f"--output_dir={_output_dir}",
                     f"--job_name={_run_id}",
-                    f"--dataset.root={ds.DATASET_ROOT}",
+                    f"--dataset.root={profile['dataset_root']}",
                 ]
                 if _latest_snapshot:
                     _cmd.append(f"--dataset.episodes={_latest_snapshot['train_episodes']}")
@@ -238,7 +251,8 @@ with st.container(border=True):
                     if _latest_snapshot
                     else None
                 )
-                tr.create_run(_run_id, str(_output_dir), dataset_snapshot_path=_snapshot_path, cmd=_cmd)
+                tr.create_run(_run_id, str(_output_dir), dataset_snapshot_path=_snapshot_path, cmd=_cmd,
+                               dataset_id=dataset_id)
                 try:
                     _started = pm.start_job(STAGE, _cmd, extra_meta={"run_id": _run_id})
                 except pm.JobConflictError as e:
@@ -312,78 +326,85 @@ with st.container(border=True):
                 # 설정
                 st.selectbox("재개할 학습", options=_resume_labels, key="training_resume_select")
 
-# 2. 결과(results) -- 체크포인트 스윕 loss + 저장된 체크포인트 목록
+# 2. 결과(results) -- 체크포인트 스윕 loss(있으면) + 저장된 체크포인트 목록
 with st.container(border=True):
     render_card_header("📈", "학습 결과", "success")
-    st.caption(
-        "각 체크포인트(1500~10000 step)로 val episodes=[5,7,9] / train episodes=[0,1]에 대해 "
-        "`policy.forward()` loss를 재현 측정한 결과 (같은 원리로 lerobot-train은 val loss를 기본 제공하지 않아 직접 재현)."
-    )
 
-    sweep_df = ds.get_checkpoint_sweep_df()
-    long_df = sweep_df.melt(id_vars="step", value_vars=["train_loss", "val_loss"], var_name="series", value_name="loss")
-    long_df["series"] = long_df["series"].map({"train_loss": "train", "val_loss": "val"})
-
-    KNEE_LO, KNEE_HI = 6000, 7500
-    band_df = pd.DataFrame({"x": [KNEE_LO], "x2": [KNEE_HI]})
-
-    band = alt.Chart(band_df).mark_rect(opacity=0.08, color="#52514e").encode(x="x:Q", x2="x2:Q")
-    loss_lines = (
-        alt.Chart(long_df)
-        .mark_line(point=alt.OverlayMarkDef(size=70), strokeWidth=2)
-        .encode(
-            x=alt.X("step:Q", title="training step"),
-            y=alt.Y("loss:Q", title="loss"),
-            color=alt.Color(
-                "series:N",
-                scale=alt.Scale(domain=["train", "val"], range=[TRAIN_COLOR, VAL_COLOR]),
-                legend=alt.Legend(title=None, orient="top-right"),
-            ),
-            tooltip=["step", "series", alt.Tooltip("loss:Q", format=".4f")],
+    sweep_df = ds.get_checkpoint_sweep_df(dataset_id=dataset_id)
+    if sweep_df is None:
+        st.info(
+            f"'{profile['label']}' 데이터셋은 아직 체크포인트 스윕(step별 val loss 재현 측정) 리포트가 없습니다 — "
+            "아래 '저장된 체크포인트' 목록과 실행 중 로그의 train loss만 참고하세요.",
+            icon="ℹ️",
         )
-        .properties(height=320)
-    )
-    st.altair_chart((band + loss_lines).properties(title="train vs val loss"), width='stretch')
-
-    ratio_line = (
-        alt.Chart(sweep_df)
-        .mark_line(point=alt.OverlayMarkDef(size=70), strokeWidth=2, color=RATIO_COLOR)
-        .encode(
-            x=alt.X("step:Q", title="training step"),
-            y=alt.Y("ratio:Q", title="val / train loss ratio"),
-            tooltip=["step", alt.Tooltip("ratio:Q", format=".2f")],
+    else:
+        st.caption(
+            "각 체크포인트로 val/train episodes에 대해 `policy.forward()` loss를 재현 측정한 결과 "
+            "(lerobot-train은 val loss를 기본 제공하지 않아 직접 재현)."
         )
-        .properties(height=220)
-    )
-    rule = alt.Chart(pd.DataFrame({"y": [1.0]})).mark_rule(strokeDash=[4, 4], color="#52514e").encode(y="y:Q")
-    st.altair_chart((band + ratio_line + rule).properties(title="val/train ratio (1.0 = 과적합 없음)"), width='stretch')
+        long_df = sweep_df.melt(id_vars="step", value_vars=["train_loss", "val_loss"], var_name="series", value_name="loss")
+        long_df["series"] = long_df["series"].map({"train_loss": "train", "val_loss": "val"})
 
-    st.info(
-        f"**early stopping 적정 지점: step {KNEE_LO}~{KNEE_HI}** — 이 구간부터 val loss 개선폭이 "
-        "직전 구간 대비 5~10배 작아지며 사실상 정체됩니다(0.50→0.48, 이후 0.48→0.465로 거의 안 줄어듦). "
-        "반면 train loss는 계속 떨어지고 ratio는 끝까지 단조 증가(1.24x→3.79x) — step 10000까지 다 돌리는 것보다 "
-        "이 구간에서 멈추는 게 과적합 대비 유리한 트레이드오프입니다.",
-        icon="🎯",
-    )
+        KNEE_LO, KNEE_HI = 6000, 7500
+        band_df = pd.DataFrame({"x": [KNEE_LO], "x2": [KNEE_HI]})
+
+        band = alt.Chart(band_df).mark_rect(opacity=0.08, color="#52514e").encode(x="x:Q", x2="x2:Q")
+        loss_lines = (
+            alt.Chart(long_df)
+            .mark_line(point=alt.OverlayMarkDef(size=70), strokeWidth=2)
+            .encode(
+                x=alt.X("step:Q", title="training step"),
+                y=alt.Y("loss:Q", title="loss"),
+                color=alt.Color(
+                    "series:N",
+                    scale=alt.Scale(domain=["train", "val"], range=[TRAIN_COLOR, VAL_COLOR]),
+                    legend=alt.Legend(title=None, orient="top-right"),
+                ),
+                tooltip=["step", "series", alt.Tooltip("loss:Q", format=".4f")],
+            )
+            .properties(height=320)
+        )
+        st.altair_chart((band + loss_lines).properties(title="train vs val loss"), width='stretch')
+
+        ratio_line = (
+            alt.Chart(sweep_df)
+            .mark_line(point=alt.OverlayMarkDef(size=70), strokeWidth=2, color=RATIO_COLOR)
+            .encode(
+                x=alt.X("step:Q", title="training step"),
+                y=alt.Y("ratio:Q", title="val / train loss ratio"),
+                tooltip=["step", alt.Tooltip("ratio:Q", format=".2f")],
+            )
+            .properties(height=220)
+        )
+        rule = alt.Chart(pd.DataFrame({"y": [1.0]})).mark_rule(strokeDash=[4, 4], color="#52514e").encode(y="y:Q")
+        st.altair_chart((band + ratio_line + rule).properties(title="val/train ratio (1.0 = 과적합 없음)"), width='stretch')
+
+        st.info(
+            f"**early stopping 적정 지점: step {KNEE_LO}~{KNEE_HI}** — 이 구간부터 val loss 개선폭이 "
+            "직전 구간 대비 5~10배 작아지며 사실상 정체됩니다(0.50→0.48, 이후 0.48→0.465로 거의 안 줄어듦). "
+            "반면 train loss는 계속 떨어지고 ratio는 끝까지 단조 증가(1.24x→3.79x) — step 10000까지 다 돌리는 것보다 "
+            "이 구간에서 멈추는 게 과적합 대비 유리한 트레이드오프입니다(사각형 블록 데이터셋 기준 수치).",
+            icon="🎯",
+        )
 
     st.markdown("**저장된 체크포인트**")
-    st.dataframe(ds.get_checkpoint_list_df(), width='stretch', hide_index=True)
+    st.dataframe(ds.get_checkpoint_list_df(dataset_id=dataset_id), width='stretch', hide_index=True)
 
 # 3. 메타정보(접힘) -- 정적 yaml 설정값 + PNG
-with st.expander("(자세히 보기) 학습 설정 (train_main_run_config.yaml) · 정적 PNG"):
-    cfg = ds.get_train_config()
+with st.expander(f"(자세히 보기) 학습 설정 ({profile['train_config'].name}) · 정적 PNG"):
+    cfg = ds.get_train_config(dataset_id=dataset_id)
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("steps", cfg["steps"])
     c2.metric("batch_size", cfg["batch_size"])
     c3.metric("num_workers", cfg["num_workers"])
     c4.metric("save_freq", cfg["save_freq"])
-    st.write(f"**dataset.episodes** (train, 13개): `{cfg['dataset']['episodes']}`")
+    st.write(f"**dataset.episodes** (train, {len(cfg['dataset']['episodes'])}개): `{cfg['dataset']['episodes']}`")
     st.write(f"**policy.normalization_mapping**: `{cfg['policy']['normalization_mapping']}`")
 
     # 주의: st.expander는 다른 expander 안에 중첩할 수 없다(Streamlit 제약) --
     # 이 섹션이 원래 독립 expander였으나, 지금은 위 메타정보 expander 안에
     # 있으므로 일반 섹션(subheader + 상시 표시)으로 바꿨다.
-    st.subheader("정적 PNG로도 보기 (다운로드/대조용)")
-    png_path = ds.get_asset_path("checkpoint_sweep_loss.png")
+    png_path = ds.get_asset_path("checkpoint_sweep_loss.png", dataset_id=dataset_id)
     if png_path.exists():
+        st.subheader("정적 PNG로도 보기 (다운로드/대조용)")
         st.image(str(png_path))

@@ -178,7 +178,15 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SCENE_XML = str(PROJECT_ROOT / "robot_model" / "scene.xml")
 
 sys.path.insert(0, str(PROJECT_ROOT / "pipeline"))
-from camera_config import WRIST_IMAGE_HEIGHT, WRIST_IMAGE_WIDTH  # noqa: E402
+from camera_config import (  # noqa: E402
+    DATA_COLLECTION_STREAM_PORT,
+    SCENE_STREAM_FPS,
+    SCENE_STREAM_HEIGHT,
+    SCENE_STREAM_WIDTH,
+    WRIST_IMAGE_HEIGHT,
+    WRIST_IMAGE_WIDTH,
+)
+from mjpeg_stream import SceneStreamServer  # noqa: E402
 
 JOINT_NAMES = [
     "shoulder_pan",
@@ -628,6 +636,29 @@ def main():
     # 렌더러. 뷰어(GUI)와는 별도의 렌더 타깃이라 뷰어 창 표시 여부와 무관하게 동작함.
     renderer = mujoco.Renderer(model, height=IMAGE_HEIGHT, width=IMAGE_WIDTH)
 
+    # 브라우저 내 라이브 스트리밍용 3인칭 씬 렌더러(CLAUDE.md 44절). 위
+    # wrist_cam renderer(녹화/미리보기 경로)와는 완전히 분리된 별도 렌더러/카메라라,
+    # 이 스트림이 실패해도 녹화 자체에는 영향이 없다. mujoco.viewer가 처음 열릴 때
+    # 쓰는 것과 같은 방식(mjv_defaultFreeCamera)으로 모델 전체가 보이는 기본 시점을
+    # 잡는다 -- scene.xml에 씬 전용 카메라를 새로 정의할 필요가 없다.
+    scene_renderer = mujoco.Renderer(model, height=SCENE_STREAM_HEIGHT, width=SCENE_STREAM_WIDTH)
+    scene_cam = mujoco.MjvCamera()
+    mujoco.mjv_defaultFreeCamera(model, scene_cam)
+
+    mjpeg_server = None
+    try:
+        mjpeg_server = SceneStreamServer(port=DATA_COLLECTION_STREAM_PORT)
+        mjpeg_server.start()
+        print(
+            f"[run_teleop_real] 브라우저 스트리밍: http://127.0.0.1:{DATA_COLLECTION_STREAM_PORT}/stream"
+        )
+    except Exception:
+        # 포트 점유 등으로 스트리밍 서버가 안 떠도 녹화 자체는 계속 진행해야 하므로
+        # 실패를 흡수한다(CameraPreviewWindow 생성 실패를 다루는 아래 패턴과 동일).
+        print("[run_teleop_real] 스트리밍 서버 시작 실패(녹화는 계속 진행):", flush=True)
+        traceback.print_exc()
+        mjpeg_server = None
+
     # 손목 카메라 실시간 미리보기 창. 디스플레이가 없거나 tkinter 초기화가
     # 실패해도(예: 원격 세션) 녹화 자체는 계속 동작해야 하므로 실패를 흡수한다.
     try:
@@ -711,6 +742,8 @@ def main():
         frame_accum = 0.0
         frame_interval = 1.0 / RECORD_FPS
         loop_dt = 1.0 / args.hz
+        scene_frame_accum = 0.0
+        scene_frame_interval = 1.0 / SCENE_STREAM_FPS
 
         try:
             with mujoco.viewer.launch_passive(model, data, key_callback=key_callback) as viewer:
@@ -830,6 +863,25 @@ def main():
                         print("[run_teleop_real] 카메라 프레임 처리 중 오류(이번 프레임 건너뜀):", flush=True)
                         traceback.print_exc()
 
+                    # 브라우저 스트리밍용 씬 렌더 -- wrist_cam 녹화 경로와는 독립된
+                    # accumulator/try-except를 쓴다. 이 블록이 실패하거나(해상도 등
+                    # 어떤 이유로든) 스트리밍 서버가 아예 없어도 위 녹화 경로에는
+                    # 어떤 영향도 주지 않는다(순수 모니터링용이라 AssertionError로
+                    # 세션을 중단시키지도 않음 -- wrist_cam 블록과의 의도적인 차이).
+                    if mjpeg_server is not None:
+                        try:
+                            scene_frame_accum += loop_dt
+                            if scene_frame_accum >= scene_frame_interval:
+                                scene_frame_accum -= scene_frame_interval
+                                scene_renderer.update_scene(data, camera=scene_cam)
+                                mjpeg_server.publish_frame(scene_renderer.render())
+                        except Exception:
+                            print(
+                                "[run_teleop_real] 스트리밍 프레임 렌더 중 오류(이번 프레임 건너뜀, 녹화엔 영향 없음):",
+                                flush=True,
+                            )
+                            traceback.print_exc()
+
                     time_until_next_step = loop_dt - (time.time() - step_start)
                     if time_until_next_step > 0:
                         time.sleep(time_until_next_step)
@@ -847,6 +899,9 @@ def main():
             print(f"[run_teleop_real] 총 {dataset.meta.total_episodes} episodes 저장됨: {args.root}")
     finally:
         renderer.close()
+        scene_renderer.close()
+        if mjpeg_server is not None:
+            mjpeg_server.stop()
         if preview is not None:
             preview.close()
         safe_disconnect(leader)
