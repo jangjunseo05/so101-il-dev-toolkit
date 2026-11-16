@@ -36,6 +36,7 @@ from streamlit_autorefresh import st_autorefresh
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from lib import data_sources as ds
 from lib import dataset_registry
+from lib import demo_mode
 from lib import process_manager as pm
 from lib import training_run as tr
 from lib.ui_components import get_logo_icon, render_brand_header, render_card_header
@@ -183,141 +184,165 @@ if _option_labels:
         st.session_state["sim_ckpt"] = _option_labels[0]
 st.session_state.setdefault("healthcheck_duration", 5.0)
 
-# 1. 행동(action) -- 트랙 A/B는 블로킹 조건이 비대칭이라 outer 헤더는
-# 항상 action 고정(추론 위계 재정리 결정 사항), 각 탭이 자기 블로킹만 표시.
-with st.container(border=True):
-    render_card_header("", "추론 세션 제어", "action")
+if demo_mode.ENABLED:
+    with st.container(border=True):
+        render_card_header("", "추론 세션 제어", "action")
+        demo_mode.render_locked("추론 실행은 GPU와 MuJoCo 뷰어 창이 있는 컴퓨터에서만 할 수 있습니다.")
+else:
+    # 1. 행동(action) -- 트랙 A/B는 블로킹 조건이 비대칭이라 outer 헤더는
+    # 항상 action 고정(추론 위계 재정리 결정 사항), 각 탭이 자기 블로킹만 표시.
+    with st.container(border=True):
+        render_card_header("", "추론 세션 제어", "action")
 
-    st.info(
-        "트랙 A는 NaN/Inf·에러 유무만, 트랙 B는 사람이 직접 뷰어로 관찰하는 용도입니다. ",
-        icon="ℹ️",
-    )
+        st.info(
+            "트랙 A는 NaN/Inf·에러 유무만, 트랙 B는 사람이 직접 뷰어로 관찰하는 용도입니다. ",
+            icon="ℹ️",
+        )
 
-    if not checkpoint_options:
-        st.warning("사용 가능한 체크포인트가 없습니다 — ③에서 학습을 완료하거나 `checkpoints/010000`이 있어야 합니다.", icon="⚠️")
+        if not checkpoint_options:
+            st.warning("사용 가능한 체크포인트가 없습니다 — ③에서 학습을 완료하거나 `checkpoints/010000`이 있어야 합니다.", icon="⚠️")
 
-    tab_a, tab_b = st.tabs(["⚡ A:빠른 헬스체크", "🖥️ B:시뮬레이션 관찰"])
+        tab_a, tab_b = st.tabs(["⚡ A:빠른 헬스체크", "🖥️ B:시뮬레이션 관찰"])
 
-    with tab_a:
-        if checkpoint_options:
-            # check_conflict()는 "다른" stage와의 충돌만 보므로(자기 자신은 검사에서
-            # 제외됨), 트랙 B(같은 inference stage)가 이미 실행 중인 경우까지
-            # 막으려면 job_status["running"]도 같이 봐야 한다 -- 안 그러면 트랙 B가
-            # GPU/뷰어를 쓰고 있는 동안 트랙 A에서 또 다른 GPU 프로세스를 락 없이
-            # 띄워버릴 수 있음(실제 AppTest로 재현해서 발견, CLAUDE.md 33절 참고).
-            _conflict_a = pm.check_conflict(STAGE)
-            _blocked_by_self = job_status["running"]
-            _a_blocked = _conflict_a is not None or _blocked_by_self
-
-            # 행동 먼저 -- session_state["healthcheck_ckpt"/"healthcheck_duration"]은 위에서 이미 seed됨
-            if st.button("⚡ 빠른 헬스체크 실행", disabled=_a_blocked, type="primary"):
-                healthcheck_ckpt = checkpoint_options[st.session_state["healthcheck_ckpt"]]
-                duration = st.session_state["healthcheck_duration"]
-                cmd = [
-                    sys.executable, str(INFERENCE_SCRIPT),
-                    "--checkpoint", healthcheck_ckpt,
-                    "--headless",
-                    "--duration", str(duration),
-                ]
-                with st.spinner(f"헤드리스 실행 중... ({duration:.0f}초 분량, 로딩 포함 최대 1분 정도)"):
-                    t0 = time.time()
-                    try:
-                        result = subprocess.run(
-                            cmd,
-                            capture_output=True,
-                            text=True,
-                            encoding="utf-8",
-                            errors="replace",
-                            cwd=str(ds.PROJECT_ROOT),
-                            timeout=max(120.0, duration + 60.0),
-                        )
-                        elapsed = time.time() - t0
-                        output = result.stdout + result.stderr
-                        ok, reasons = _judge_healthcheck_output(output, result.returncode)
-
-                        if ok:
-                            st.success(f"✅ 통과 — exit code 0, NaN/Inf 없음 ({elapsed:.1f}초 소요)", icon="✅")
-                        else:
-                            st.error(f"❌ 실패 — {', '.join(reasons)} ({elapsed:.1f}초 소요)", icon="❌")
-                        with st.expander("전체 출력 보기"):
-                            st.code(output, language=None)
-                    except subprocess.TimeoutExpired as e:
-                        st.error(f"❌ 시간 초과({e.timeout:.0f}초) — 응답이 없습니다.", icon="❌")
-
-            # 이 탭만의 블로킹 사유 (탭별 독립 -- 트랙 B와 공유하지 않음)
-            if _conflict_a is not None:
-                st.caption(f"⚠️ '{_conflict_a}'가 겹치는 자원(GPU)을 사용 중이라 지금은 실행할 수 없습니다.")
-            elif _blocked_by_self:
-                st.caption("⚠️ 트랙 B(시뮬레이션 관찰) 세션이 이미 실행 중이라 지금은 실행할 수 없습니다.")
-
-            # 설정
-            st.selectbox("체크포인트", options=_option_labels, key="healthcheck_ckpt")
-            st.number_input("시뮬레이션 시간(초)", min_value=1.0, max_value=60.0, step=1.0, key="healthcheck_duration")
-            st.caption(
-                "체크포인트가 최소한 안 깨졌는지, NaN/Inf 없이 유한한 액션이 나오는지 짧게 확인합니다. "
-                "뷰어가 없어 시각적 피드백은 없고(로딩 포함 실측 약 11초/5초 분량), 응답이 올 때까지 페이지가 멈춰 있습니다."
-            )
-
-    with tab_b:
-        if job_status["running"]:
-            elapsed = time.time() - job_status["started_at"]
-            c1, c2, c3 = st.columns(3)
-            c1.metric("상태", "🖥️ 실행 중")
-            c2.metric("PID", job_status["pid"])
-            c3.metric("경과 시간", f"{int(elapsed // 60)}분 {int(elapsed % 60)}초")
-
-            # 브라우저 내 라이브 스트리밍(§44) -- ①(데이터 수집)과 동일 패턴.
-            # R 키 episode 리셋은 여전히 네이티브 뷰어 창에서만 가능하다.
-            st.markdown("**📺 실시간 화면 (3인칭 뷰)**")
-            st.caption(
-                "MuJoCo 뷰어 창과는 별개로, 브라우저에서도 씬을 볼 수 있습니다(약 15fps). "
-                "R 키 episode 리셋은 여전히 뷰어 창에서 해야 합니다. 몇 초가 지나도 안 뜨면 새로고침하세요."
-            )
-            st.markdown(
-                f'<img src="http://127.0.0.1:{INFERENCE_STREAM_PORT}/stream" '
-                f'style="width:100%;max-width:640px;border-radius:4px;" />',
-                unsafe_allow_html=True,
-            )
-
-            st_autorefresh(interval=2000, key="inference_log_autorefresh")
-            log_text = pm.tail_log(job_status["log_path"], n_lines=200)
-            st.text_area("실시간 로그 (2초마다 자동 갱신)", value=log_text, height=300, key="inference_log_area")
-
-            st.markdown("**⏹ 세션 종료**")
-            st.caption("이 버튼은 세션을 즉시 종료합니다 — 추론은 저장하는 데이터가 없어 안전합니다.")
-            if st.button("⏹ 세션 종료", type="primary"):
-                pm.stop_job(STAGE, graceful=False)
-                st.success("세션을 종료했습니다.")
-                st.rerun()
-        else:
+        with tab_a:
             if checkpoint_options:
-                _conflict_b = pm.check_conflict(STAGE)
+                # check_conflict()는 "다른" stage와의 충돌만 보므로(자기 자신은 검사에서
+                # 제외됨), 트랙 B(같은 inference stage)가 이미 실행 중인 경우까지
+                # 막으려면 job_status["running"]도 같이 봐야 한다 -- 안 그러면 트랙 B가
+                # GPU/뷰어를 쓰고 있는 동안 트랙 A에서 또 다른 GPU 프로세스를 락 없이
+                # 띄워버릴 수 있음(실제 AppTest로 재현해서 발견, CLAUDE.md 33절 참고).
+                _conflict_a = pm.check_conflict(STAGE)
+                _blocked_by_self = job_status["running"]
+                _a_blocked = _conflict_a is not None or _blocked_by_self
 
-                # 행동 먼저 -- session_state["sim_ckpt"]는 위에서 이미 seed됨
-                if st.button("🖥️ 시뮬레이션 관찰 시작", disabled=(_conflict_b is not None), type="primary"):
-                    sim_ckpt = checkpoint_options[st.session_state["sim_ckpt"]]
+                # 행동 먼저 -- session_state["healthcheck_ckpt"/"healthcheck_duration"]은 위에서 이미 seed됨
+                if st.button("⚡ 빠른 헬스체크 실행", disabled=_a_blocked, type="primary"):
+                    healthcheck_ckpt = checkpoint_options[st.session_state["healthcheck_ckpt"]]
+                    duration = st.session_state["healthcheck_duration"]
                     cmd = [
                         sys.executable, str(INFERENCE_SCRIPT),
-                        "--checkpoint", sim_ckpt,
+                        "--checkpoint", healthcheck_ckpt,
+                        "--headless",
+                        "--duration", str(duration),
                     ]
-                    try:
-                        pm.start_job(STAGE, cmd)
-                        st.session_state.pop(_crash_key, None)
-                        st.success("세션을 시작했습니다. 잠시 후 MuJoCo 뷰어 창이 뜹니다.")
-                        st.rerun()
-                    except pm.JobConflictError as e:
-                        st.error(str(e))
+                    with st.spinner(f"헤드리스 실행 중... ({duration:.0f}초 분량, 로딩 포함 최대 1분 정도)"):
+                        t0 = time.time()
+                        try:
+                            result = subprocess.run(
+                                cmd,
+                                capture_output=True,
+                                text=True,
+                                encoding="utf-8",
+                                errors="replace",
+                                cwd=str(ds.PROJECT_ROOT),
+                                timeout=max(120.0, duration + 60.0),
+                            )
+                            elapsed = time.time() - t0
+                            output = result.stdout + result.stderr
+                            ok, reasons = _judge_healthcheck_output(output, result.returncode)
 
-                # 이 탭만의 블로킹 사유
-                if _conflict_b is not None:
-                    st.caption(f"⚠️ '{_conflict_b}'가 겹치는 자원(GPU/MuJoCo 뷰어)을 사용 중이라 지금은 시작할 수 없습니다.")
+                            if ok:
+                                st.success(f"✅ 통과 — exit code 0, NaN/Inf 없음 ({elapsed:.1f}초 소요)", icon="✅")
+                            else:
+                                st.error(f"❌ 실패 — {', '.join(reasons)} ({elapsed:.1f}초 소요)", icon="❌")
+                            with st.expander("전체 출력 보기"):
+                                st.code(output, language=None)
+                        except subprocess.TimeoutExpired as e:
+                            st.error(f"❌ 시간 초과({e.timeout:.0f}초) — 응답이 없습니다.", icon="❌")
+
+                # 이 탭만의 블로킹 사유 (탭별 독립 -- 트랙 B와 공유하지 않음)
+                if _conflict_a is not None:
+                    st.caption(f"⚠️ '{_conflict_a}'가 겹치는 자원(GPU)을 사용 중이라 지금은 실행할 수 없습니다.")
+                elif _blocked_by_self:
+                    st.caption("⚠️ 트랙 B(시뮬레이션 관찰) 세션이 이미 실행 중이라 지금은 실행할 수 없습니다.")
 
                 # 설정
-                st.selectbox("체크포인트", options=_option_labels, key="sim_ckpt")
+                st.selectbox("체크포인트", options=_option_labels, key="healthcheck_ckpt")
+                st.number_input("시뮬레이션 시간(초)", min_value=1.0, max_value=60.0, step=1.0, key="healthcheck_duration")
                 st.caption(
-                    "MuJoCo 뷰어 창(+카메라 미리보기)이 로컬에 뜨고, policy가 자율로 움직이는 걸 직접 관찰합니다. "
-                    "R 키: episode 리셋. 뷰어 창을 닫거나 위 버튼으로 세션을 끝낼 수 있습니다."
+                    "체크포인트가 최소한 안 깨졌는지, NaN/Inf 없이 유한한 액션이 나오는지 짧게 확인합니다. "
+                    "뷰어가 없어 시각적 피드백은 없고(로딩 포함 실측 약 11초/5초 분량), 응답이 올 때까지 페이지가 멈춰 있습니다."
                 )
+
+        with tab_b:
+            if job_status["running"]:
+                elapsed = time.time() - job_status["started_at"]
+                c1, c2, c3 = st.columns(3)
+                c1.metric("상태", "🖥️ 실행 중")
+                c2.metric("PID", job_status["pid"])
+                c3.metric("경과 시간", f"{int(elapsed // 60)}분 {int(elapsed % 60)}초")
+
+                # 브라우저 내 라이브 스트리밍(§44) -- ①(데이터 수집)과 동일 패턴.
+                # R 키 episode 리셋은 여전히 네이티브 뷰어 창에서만 가능하다.
+                st.markdown("**📺 실시간 화면 (3인칭 뷰)**")
+                st.caption(
+                    "MuJoCo 뷰어 창과는 별개로, 브라우저에서도 씬을 볼 수 있습니다(약 15fps). "
+                    "R 키 episode 리셋은 여전히 뷰어 창에서 해야 합니다. 몇 초가 지나도 안 뜨면 새로고침하세요."
+                )
+                st.markdown(
+                    f'<img src="http://127.0.0.1:{INFERENCE_STREAM_PORT}/stream" '
+                    f'style="width:100%;max-width:640px;border-radius:4px;" />',
+                    unsafe_allow_html=True,
+                )
+
+                st_autorefresh(interval=2000, key="inference_log_autorefresh")
+                log_text = pm.tail_log(job_status["log_path"], n_lines=200)
+                st.text_area("실시간 로그 (2초마다 자동 갱신)", value=log_text, height=300, key="inference_log_area")
+
+                st.markdown("**⏹ 세션 종료**")
+                st.caption("이 버튼은 세션을 즉시 종료합니다 — 추론은 저장하는 데이터가 없어 안전합니다.")
+                if st.button("⏹ 세션 종료", type="primary"):
+                    pm.stop_job(STAGE, graceful=False)
+                    st.success("세션을 종료했습니다.")
+                    st.rerun()
+            else:
+                if checkpoint_options:
+                    _conflict_b = pm.check_conflict(STAGE)
+
+                    # 행동 먼저 -- session_state["sim_ckpt"]는 위에서 이미 seed됨
+                    if st.button("🖥️ 시뮬레이션 관찰 시작", disabled=(_conflict_b is not None), type="primary"):
+                        sim_ckpt = checkpoint_options[st.session_state["sim_ckpt"]]
+                        cmd = [
+                            sys.executable, str(INFERENCE_SCRIPT),
+                            "--checkpoint", sim_ckpt,
+                        ]
+                        try:
+                            pm.start_job(STAGE, cmd)
+                            st.session_state.pop(_crash_key, None)
+                            st.success("세션을 시작했습니다. 잠시 후 MuJoCo 뷰어 창이 뜹니다.")
+                            st.rerun()
+                        except pm.JobConflictError as e:
+                            st.error(str(e))
+
+                    # 이 탭만의 블로킹 사유
+                    if _conflict_b is not None:
+                        st.caption(f"⚠️ '{_conflict_b}'가 겹치는 자원(GPU/MuJoCo 뷰어)을 사용 중이라 지금은 시작할 수 없습니다.")
+
+                    # 설정
+                    st.selectbox("체크포인트", options=_option_labels, key="sim_ckpt")
+                    st.caption(
+                        "MuJoCo 뷰어 창(+카메라 미리보기)이 로컬에 뜨고, policy가 자율로 움직이는 걸 직접 관찰합니다. "
+                        "R 키: episode 리셋. 뷰어 창을 닫거나 위 버튼으로 세션을 끝낼 수 있습니다."
+                    )
+
+_eval = ds.get_latest_eval_report(dataset_id=dataset_id)
+if _eval:
+    with st.container(border=True):
+        render_card_header("🎯", "자동 성공률 평가 (eval_success_mujoco.py)", "success")
+        st.caption(
+            f"학습된 정책이 MuJoCo에서 혼자 물체를 집어 접시에 놓는지 {_eval['episodes']}번 반복 실행. "
+            f"물체가 접시 위에 {_eval['hold_seconds']:g}초 이상 머물면 성공, 최대 {_eval['max_seconds']:g}초."
+        )
+        e1, e2, e3 = st.columns(3)
+        e1.metric("성공", f"{_eval['successes']} / {_eval['episodes']}")
+        e2.metric("성공률", f"{_eval['success_rate'] * 100:.0f}%")
+        _times = [r.get("time_to_place_s") for r in _eval.get("results", []) if r.get("success") and r.get("time_to_place_s") is not None]
+        e3.metric("놓기까지 평균 시간", f"{sum(_times) / len(_times):.1f}초" if _times else "-")
+        _video = ds.get_asset_path("inference_demo.mp4", dataset_id=dataset_id)
+        if _video.is_file():
+            st.video(str(_video), muted=True)
+            st.caption("평가 실행 장면 (3인칭 MuJoCo 렌더, 편집 없음)")
+        st.caption(f"결과 파일: `{_eval['_file']}`")
 
 if dataset_id == "block_pickplace":
     # 2. 결과(results) -- 정적/과거 기록, 트랙 A의 매번 다른 결과와 혼동되지 않도록

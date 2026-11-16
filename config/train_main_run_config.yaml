@@ -8,9 +8,9 @@ dataset:
   # 실행할 경우에만 아래 값이 그대로 쓰이므로, 그 전에 자신의 프로젝트 폴더
   # 기준 경로로 반드시 고쳐서 쓸 것 (예: <clone한 경로>/data/so101_teleop_real).
   root: C:/Users/USER/Desktop/mujoco/SO-ARM100/Simulation/SO101/so101_web/data/so101_teleop_real
-  # CLAUDE.md 24-3절 train_episodes (episode 11은 S 키 오조작으로 인한 무효
-  # 데모로 확인되어 제외, 24-3절 참고)
-  episodes: [0, 1, 2, 3, 4, 6, 8, 10, 12, 13, 14, 15, 16]
+  # 2026-11 개선: 고정 위치 데이터를 새로 모으므로 이전 데이터셋 전용 episode
+  # 목록([0,1,2,3,4,6,8,10,12,13,14,15,16], 24-3절)을 제거했다. 지정하지 않으면
+  # 전체 episode를 쓰고, 대시보드는 QA 스냅샷이 있으면 그 train_episodes로 덮어쓴다.
 
 policy:
   type: act
@@ -29,7 +29,8 @@ seed: 1000
 # @batch=8)보다 데이터 로딩(data_s)이 압도적 병목(num_workers=0일 때 ~1.8-2.0s).
 # num_workers=8(logical CPU 16개 중)로 올리자 정상상태 data_s가 대폭 줄어
 # 스텝당 시간이 ~2.0s -> ~0.57s(batch=8 기준)로 개선됨.
-num_workers: 8
+# 2026-11: 이 노트북(i5-10300H, 논리 8코어)에서는 6이 가장 안정적이었다.
+num_workers: 6
 
 # 배치 크기를 8->16/32로 올려도 초당 처리 샘플 수(~14 samples/s)는 거의
 # 그대로였음(데이터 로딩이 병목이라 배치를 키운다고 처리량이 늘지 않음,
@@ -37,6 +38,7 @@ num_workers: 8
 # gradient 노이즈를 줄이는 효과가 큼. 8GB에서 32도 OOM 없이 여유 있게 돌아갔지만,
 # 데이터셋이 작아(13 episodes/6800 frames) 과도하게 큰 배치는 step당 정보 이득
 # 대비 이점이 작다고 판단해 8과 32 사이 중간값인 16으로 선택.
+# 2026-11: 240x320 이미지 기준 GTX 1650 Ti(4GB)에서 batch=16 정상(~1.2s/step).
 batch_size: 16
 
 # steps 산정 근거: batch=16/num_workers=8 60-step 벤치마크에서 정상상태
@@ -50,7 +52,8 @@ log_freq: 50
 # 전체 10000 steps의 15% 간격 (10~20% 범위 내) -> 1500,3000,...,9000 + 마지막
 # 10000 총 7개 체크포인트. 체크포인트 1개당 실측 ~591MB(옵티마이저 상태 포함)로
 # 7개 ~4.1GB, 여유 디스크(181GB) 대비 무시할 수준.
-save_freq: 1500
+# 2026-11: 10000 steps / 2000 간격 -> 5개 체크포인트(성공률 비교용).
+save_freq: 2000
 
 # lerobot-train의 eval_freq/eval.*는 gym 환경(cfg.env) 기반 rollout 평가
 # 전용으로, cfg.env가 None이면 조건문(`cfg.eval_freq > 0 and cfg.env is not None`,

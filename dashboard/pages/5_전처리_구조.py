@@ -29,6 +29,11 @@ st.caption(
 )
 st.page_link("pages/2_QA_검증.py", label="← ② QA 검증으로 돌아가기", icon="⬅️")
 
+# 아직 녹화된 데이터셋이 없으면(새 컴퓨터 첫 실행) Hugging Face Hub에서 찾으려다 404로 멈췄다.
+if not (ds.DATASET_ROOT / "meta" / "info.json").is_file():
+    st.info("아직 녹화된 데이터셋이 없습니다 — 정규화 통계는 데이터셋에서 읽으므로 ① 데이터 수집 후 표시됩니다.", icon="📭")
+    st.stop()
+
 with st.spinner("전처리 구조 정보 로딩 중..."):
     desc = ds.get_preprocessing_description()
 

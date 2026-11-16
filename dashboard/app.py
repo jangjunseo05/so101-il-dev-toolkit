@@ -19,6 +19,7 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lib import data_sources as ds
+from lib import demo_mode
 from lib import local_config
 from lib import next_action
 from lib.theme import STAGE_NAMES, STAGE_PAGES
@@ -70,6 +71,14 @@ def home() -> None:
     st.divider()
     st.subheader("환경 상태")
 
+    if demo_mode.ENABLED:
+        st.caption(
+            "실제 사용 시에는 여기서 리더암 포트·캘리브레이션 파일·GPU 상태를 확인합니다. "
+            "공개 데모 서버에는 장비가 없어 이 확인을 건너뜁니다."
+        )
+        _render_health_summary()
+        return
+
     _settings = local_config.load_local_settings()
     _calib_path = Path(_settings["calibration_dir"]) / f"{_settings['leader_id']}.json"
     _port_ok = bool(_settings["leader_port"].strip())
@@ -109,14 +118,33 @@ def home() -> None:
     if not (_port_ok and _calib_ok):
         st.info("처음 설정하는 경우 `docs/NEW_TEAMMATE_SETUP.md`를 참고하세요.", icon="🧭")
 
+    _render_health_summary()
+
+    st.divider()
+    st.info(
+        "4단계 전부 이 대시보드에서 직접 시작/종료할 수 있습니다. \n\n"
+        "동시 실행 시 자원(시리얼 포트/GPU/MuJoCo 뷰어) 충돌은 `lib/process_manager.py`의 lock 시스템이 자동으로 막아줍니다.",
+        icon="🛠️",
+    )
+
+
+def _render_health_summary() -> None:
     st.divider()
     st.subheader("파이프라인 헬스 요약")
     st.caption("터미널 로그 대신, 이 파이프라인이 실제로 정상 작동했다는 근거가 되는 핵심 수치만 모았습니다.")
 
+    # 새 컴퓨터 첫 실행처럼 아직 녹화된 데이터셋이 없으면 info.json을 읽다가 홈 전체가
+    # 오류로 멈췄다 -- 헬스 요약만 건너뛰고 안내를 보여 준다.
+    if not (ds.DATASET_ROOT / "meta" / "info.json").is_file():
+        st.info("아직 녹화된 데이터셋이 없어 헬스 요약을 건너뜁니다. ① 데이터 수집에서 첫 episode를 저장하면 표시됩니다.", icon="📭")
+        return
+
     info = ds.get_dataset_info()
     qa = ds.get_qa_results()
+    summary = ds.get_pipeline_summary()
     sweep_df = ds.get_checkpoint_sweep_df()
-    final_row = sweep_df.iloc[-1]
+    train_log = ds.get_train_log_df()
+    eval_report = ds.get_latest_eval_report()
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
@@ -125,20 +153,23 @@ def home() -> None:
     with c2:
         excluded_frames = qa["clean"]["excluded_count"]
         st.metric("② QA & 검증", f"{qa['num_episodes']} episodes 스캔", f"이상 프레임 {excluded_frames}건 탐지")
-        st.caption("wrist_roll clip: 재캘리브레이션 후 0건 (23절)")
     with c3:
-        st.metric("③ ACT 학습", f"final train loss {final_row['train_loss']:.3f}", f"val {final_row['val_loss']:.3f}")
-        st.caption("RTX 5050 · 10000 steps · 3h39m 완주")
+        if sweep_df is not None:
+            final_row = sweep_df.iloc[-1]
+            st.metric("③ ACT 학습", f"final train loss {final_row['train_loss']:.3f}", f"val {final_row['val_loss']:.3f}")
+        elif train_log is not None:
+            st.metric("③ ACT 학습", f"final train loss {train_log['loss'].iloc[-1]:.3f}", f"step {int(train_log['step'].iloc[-1])}")
+        else:
+            st.metric("③ ACT 학습", "기록 없음")
+        _train_bits = [summary.get(k) for k in ("gpu", "steps_label", "train_time_label") if summary.get(k)]
+        if _train_bits:
+            st.caption(" · ".join(_train_bits))
     with c4:
-        st.metric("④ 추론", "헤드리스 검증 통과", "NaN/Inf 없음")
-        st.caption("action dtype float32 유지 확인")
-
-    st.divider()
-    st.info(
-        "4단계 전부 이 대시보드에서 직접 시작/종료할 수 있습니다. \n\n"
-        "동시 실행 시 자원(시리얼 포트/GPU/MuJoCo 뷰어) 충돌은 `lib/process_manager.py`의 lock 시스템이 자동으로 막아줍니다.",
-        icon="🛠️",
-    )
+        if eval_report:
+            st.metric("④ 추론 성공률", f"{eval_report['successes']} / {eval_report['episodes']}",
+                      f"{eval_report['success_rate'] * 100:.0f}% (MuJoCo 자동 평가)")
+        else:
+            st.metric("④ 추론", "평가 기록 없음")
 
 
 # 사이드바 재구성(2026-08-17, 42-5절): pages/ 자동 스캔 -> st.navigation()

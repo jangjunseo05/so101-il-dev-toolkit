@@ -189,3 +189,65 @@ def get_asset_path(filename: str, dataset_id: str = dataset_registry.DEFAULT_DAT
     """reports/ 아래 PNG 등 산출물 파일 경로."""
     profile = dataset_registry.get_profile(dataset_id)
     return profile["reports_dir"] / filename
+
+
+@st.cache_data
+def get_pipeline_summary(dataset_id: str = dataset_registry.DEFAULT_DATASET_ID) -> dict:
+    """tools/export_demo_assets.py가 reports/에 남기는 요약(학습 GPU·시간 등).
+    없으면 빈 dict -- 호출부는 값이 없을 때 해당 문구를 생략한다."""
+    path = dataset_registry.get_profile(dataset_id)["reports_dir"] / "pipeline_summary.json"
+    if not path.is_file():
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+@st.cache_data
+def get_train_log_df(dataset_id: str = dataset_registry.DEFAULT_DATASET_ID) -> pd.DataFrame | None:
+    """lerobot-train 로그에서 뽑은 step별 train loss(reports/train_log.csv). 없으면 None."""
+    path = dataset_registry.get_profile(dataset_id)["reports_dir"] / "train_log.csv"
+    if not path.is_file():
+        return None
+    df = pd.read_csv(path)
+    return df if {"step", "loss"} <= set(df.columns) and len(df) else None
+
+
+@st.cache_data
+def get_latest_eval_report(dataset_id: str = dataset_registry.DEFAULT_DATASET_ID) -> dict | None:
+    """eval_success_mujoco.py가 남긴 reports/eval_*.json 중 가장 최근 것. 없으면 None."""
+    reports_dir = dataset_registry.get_profile(dataset_id)["reports_dir"]
+    if not reports_dir.is_dir():
+        return None
+    candidates = sorted(reports_dir.glob("eval_*.json"))
+    if not candidates:
+        return None
+    with open(candidates[-1], encoding="utf-8") as f:
+        report = json.load(f)
+    report["_file"] = candidates[-1].name
+    return report
+
+
+@st.cache_data
+def get_episode_joint_df(episode_index: int, dataset_id: str = dataset_registry.DEFAULT_DATASET_ID) -> pd.DataFrame:
+    """한 episode의 관절 상태·목표값(이미지 열은 읽지 않음) -- 데이터 둘러보기 차트용."""
+    trd = _load_team_robot_dataset(dataset_id)
+    cols = ["episode_index", "frame_index", "observation.state", "action"]
+    df = trd._base.hf_dataset.select_columns(cols).with_format(None).to_pandas()
+    df = df[df["episode_index"] == episode_index]
+    names = trd.meta.features["observation.state"].get("names") or [f"j{i}" for i in range(6)]
+    if isinstance(names, dict):
+        names = next(iter(names.values()))
+    rows = []
+    for frame, state, action in zip(df["frame_index"], df["observation.state"], df["action"]):
+        for i, name in enumerate(names):
+            rows.append({"frame": int(frame), "joint": name, "state": float(state[i]), "action": float(action[i])})
+    return pd.DataFrame(rows)
+
+
+def get_episode_preview_path(episode_index: int, dataset_id: str = dataset_registry.DEFAULT_DATASET_ID) -> Path | None:
+    """export 스크립트가 만든 손목 카메라 미리보기 mp4(reports/episode_previews/). 없으면 None."""
+    path = dataset_registry.get_profile(dataset_id)["reports_dir"] / "episode_previews" / f"episode_{episode_index:03d}.mp4"
+    return path if path.is_file() else None

@@ -36,6 +36,14 @@ _STAGE_INFO: dict[str, tuple[str, str]] = {
 }
 
 
+def _total_episodes() -> int:
+    """녹화된 데이터셋이 아직 없으면(새 컴퓨터 첫 실행) 0을 돌려준다 -- 예전엔
+    info.json이 없을 때 FileNotFoundError로 홈 페이지 전체가 멈췄다."""
+    if not (ds.DATASET_ROOT / "meta" / "info.json").is_file():
+        return 0
+    return ds.get_dataset_info()["total_episodes"]
+
+
 def get_next_action() -> dict:
     """{"kind": "in_progress"|"cta", "icon": str, "message": str, "target_page": str}"""
     for stage, (name, page) in _STAGE_INFO.items():
@@ -73,7 +81,7 @@ def get_next_action() -> dict:
             "target_page": "pages/3_ACT_학습.py",
         }
 
-    if ds.get_dataset_info()["total_episodes"] > 0:
+    if _total_episodes() > 0:
         return {
             "kind": "cta",
             "icon": "➡️",
@@ -99,7 +107,7 @@ def get_stage_progress() -> list[bool]:
     개념 자체가 성립하지 않으므로 거짓 신호를 만들지 않고 항상 미완료로
     둔다 -- ①②③이 전부 끝나면 자연히 ④가 "다음 할 일"로 표시된다.
     """
-    done_1 = ds.get_dataset_info()["total_episodes"] > 0
+    done_1 = _total_episodes() > 0
     done_2 = bool(qa_snapshot.list_snapshots())
     done_3 = any(r.get("status") == "completed" for r in tr.list_runs())
     done_4 = False

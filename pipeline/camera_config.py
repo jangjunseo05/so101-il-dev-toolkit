@@ -21,8 +21,14 @@ site) so a future mismatch fails loudly at the render call instead of
 silently at inference time.
 """
 
-WRIST_IMAGE_HEIGHT = 480
-WRIST_IMAGE_WIDTH = 640
+# 2026-11 개선: 480x640 -> 240x320. GTX 1650 Ti(4GB) 노트북에서 벤치마크한 결과
+# 480x640은 PNG 디코딩(data_s ~1.3-2.9s/step)이 병목이라 batch=8에서 ~2.1s/step
+# (~4 samples/s)였고, 240x320은 batch=16에서 ~1.2s/step(~13 samples/s)로 이전
+# 8GB 노트북의 480x640 처리량(~14 samples/s)과 비슷해졌다. 고정 위치 pick&place는
+# 2cm 물체가 손목 카메라에 충분히 크게 잡혀 해상도를 낮춰도 판단 정보가 유지된다.
+# 기존 480x640 데이터셋/체크포인트와는 호환되지 않으므로 데이터를 새로 모은다.
+WRIST_IMAGE_HEIGHT = 240
+WRIST_IMAGE_WIDTH = 320
 
 # 브라우저 내 라이브 스트리밍(CLAUDE.md 44절: MuJoCo 네이티브 창 -> 브라우저
 # 통합)용 3인칭 씬 카메라 해상도/주기. wrist_cam 녹화·정책 입력 경로와는
@@ -44,7 +50,7 @@ INFERENCE_STREAM_PORT = 8532
 # bottle_pick_pour) 전용 -- 다른 프로젝트(so101-mobile-manipulation-main)의
 # nl_pick_pour.py가 실제 웹캠 2대(front+wrist)를 이 해상도로 열어 수집한
 # 데이터라, MuJoCo 추론(run_inference_mujoco_bottle.py)도 같은 해상도로
-# 렌더해야 한다. 위 WRIST_IMAGE_*(블록 데이터셋 전용, 640x480)와는 독립된
+# 렌더해야 한다. 위 WRIST_IMAGE_*(블록 데이터셋 전용)와는 독립된
 # 상수 -- 두 데이터셋이 서로 다른 해상도를 쓰므로 공유하면 안 된다.
 # INFERENCE_STREAM_PORT는 그대로 재사용(§ dashboard STAGE="inference" lock이
 # 데이터셋과 무관하게 이미 동시 1개 세션만 허용하므로 포트 충돌 없음).

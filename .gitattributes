@@ -1,0 +1,2 @@
+# HF Space files are built on Linux -- keep LF so Dockerfile line continuations work
+deploy/hf_space/* text eol=lf

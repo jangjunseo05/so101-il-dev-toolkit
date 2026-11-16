@@ -21,6 +21,7 @@ import streamlit as st
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from lib import data_sources as ds
 from lib import dataset_registry
+from lib import demo_mode
 from lib import qa_snapshot
 from lib.ui_components import get_logo_icon, render_brand_header, render_card_header
 
@@ -47,6 +48,12 @@ dataset_id = _dataset_options[_selected_label]
 st.session_state["selected_dataset_id"] = dataset_id
 profile = dataset_registry.get_profile(dataset_id)
 
+# 선택한 데이터셋이 아직 로컬에 없으면(새 컴퓨터 첫 실행 등) TeamRobotDataset이
+# Hugging Face Hub에서 찾으려다 404로 페이지 전체가 멈췄다 -- 안내 후 중단한다.
+if not (profile["dataset_root"] / "meta" / "info.json").is_file():
+    st.info(f"이 데이터셋이 아직 로컬에 없습니다: `{profile['dataset_root']}` — ① 데이터 수집에서 episode를 저장한 뒤 다시 열어 주세요.", icon="📭")
+    st.stop()
+
 # z_thresh 기본값을 위젯 렌더보다 먼저 세션 상태에 심어둔다 -- 액션 카드
 # (스냅샷 저장 버튼)가 설정 카드보다 위에 오지만, 저장에 쓰는 qa 결과는
 # 설정 카드의 z_thresh 입력값에 의존한다. key로 바인딩된 위젯은 프레임워크가
@@ -70,7 +77,9 @@ with st.container(border=True):
         "'③ 학습' 페이지가 이 스냅샷을 자동으로 읽어 `--dataset.episodes`를 채우는 데 씁니다.\n\n"
         "데이터셋 자체는 전혀 건드리지 않고 인덱스 구성만 JSON으로 남깁니다."
     )
-    if st.button("📌 이 결과를 학습용으로 확정", type="primary"):
+    if demo_mode.ENABLED:
+        st.caption("🔒 데모에서는 스냅샷을 저장하지 않습니다. 아래 수치는 이 서버에서 방금 실제로 계산한 결과입니다.")
+    elif st.button("📌 이 결과를 학습용으로 확정", type="primary"):
         saved_path = qa_snapshot.save_snapshot(qa, repo_id=profile["repo_id"], root=str(profile["dataset_root"]))
         st.success(f"저장했습니다: {saved_path.name}")
         st.rerun()
