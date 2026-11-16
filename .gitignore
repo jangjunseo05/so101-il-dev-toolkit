@@ -48,3 +48,6 @@ Thumbs.db
 
 # Hugging Face Space build output (tools/build_hf_space.py)
 build/
+
+# Netlify CLI 로컬 연결 정보
+.netlify/
