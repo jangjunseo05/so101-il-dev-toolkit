@@ -72,3 +72,14 @@ pick&place를 완료하지 못했다. 이후 양팔 로봇 프로젝트(HOLD THE
   3. `python tools/build_hf_space.py --upload --space-id jun-seo/so101-il-dashboard` (공개 주소 생성)
 - Space: Docker SDK, CPU, `deploy/hf_space/`(Dockerfile·requirements·README). Linux용 의존성 해석은 pip dry-run으로 확인.
 - 이번에 고친 버그: ⑤ 전처리 구조 페이지도 데이터셋이 없으면 Hub 404로 멈추던 것을 안내 문구로 바꿈.
+
+## 8. Netlify 정적 체험 데모 (`web_demo/`)
+- HF Docker Space가 유료(PRO)로 바뀌어, 포트폴리오 링크용 데모는 Netlify 정적 사이트로 만든다.
+  실제 사용·녹화는 기존 Streamlit 대시보드, 외부 공개는 정적 데모가 맡는다.
+- 같은 4단계 화면(홈·①~④)을 HTML/JS로 구성하고, 결과는 `tools/build_static_demo.py`가 demo_assets/에서 뽑는다.
+  - `data/frames.bin`: 모든 frame의 state·action·timestamp(float32 원본 값). ② QA를 브라우저가 직접 계산한다(`web_demo/qa.js`).
+  - 합성 데이터로 z 기준값 5가지 조합에서 Python `TeamRobotDataset` 결과와 episode별 개수·제외 frame 수가 모두 일치함을 확인.
+    화면에서도 기본값(z=3)일 때 Python 기준값과 비교해 일치 여부를 표시한다.
+  - train/val 분할은 Python `random.Random(42)` 결과를 그대로 넣는다(브라우저에서 재현하지 않음).
+- demo_assets/가 없으면 '결과 준비 중' 상태로 빌드된다.
+- 배포: `python tools/build_static_demo.py` -> `npx -y netlify-cli deploy --dir build/static_demo --prod --site <사이트>`
