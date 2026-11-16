@@ -26,6 +26,7 @@ from pathlib import Path
 import streamlit as st
 from PIL import Image
 
+from lib import demo_mode
 from lib.theme import AQUA, BLUE, GRID, TEXT_SECONDARY, YELLOW
 
 _LOGO_PATH = Path(__file__).resolve().parents[1] / "assets" / "logo.png"
@@ -96,6 +97,7 @@ def render_brand_header() -> None:
         f'<hr style="margin:0 0 1.2em 0;border:none;border-top:1px solid {GRID};">',
         unsafe_allow_html=True,
     )
+    demo_mode.render_banner()
 
 
 # 로고 파일 코너 픽셀 실측(2026-08-17) -- 카드 role 색상 팔레트와는 무관,

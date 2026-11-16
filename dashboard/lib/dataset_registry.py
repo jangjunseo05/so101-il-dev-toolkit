@@ -72,6 +72,25 @@ DATASETS: dict[str, dict] = {
 
 DEFAULT_DATASET_ID = "block_pickplace"
 
+# 공개 데모(SO101_DEMO=1): 블록 데이터셋 하나만, 경로는 demo_assets/로 바꾼다.
+# demo_assets/는 tools/export_demo_assets.py가 실제 결과에서 만든다(lib/demo_mode.py 참고).
+from lib import demo_mode  # noqa: E402
+
+if demo_mode.ENABLED:
+    DATASETS = {
+        "block_pickplace": {
+            **DATASETS["block_pickplace"],
+            "dataset_root": demo_mode.DEMO_ROOT / "dataset",
+            "checkpoints_dir": demo_mode.DEMO_ROOT / "checkpoints",
+            # export 전이라 demo_assets에 설정이 없으면 저장소의 기본 설정으로 대신한다.
+            "train_config": (demo_mode.DEMO_ROOT / "train_config.yaml"
+                             if (demo_mode.DEMO_ROOT / "train_config.yaml").is_file()
+                             else DATASETS["block_pickplace"]["train_config"]),
+            "reports_dir": demo_mode.DEMO_ROOT / "reports",
+            "has_checkpoint_sweep_report": (demo_mode.DEMO_ROOT / "reports" / "checkpoint_sweep_results.json").is_file(),
+        }
+    }
+
 
 def get_profile(dataset_id: str) -> dict:
     if dataset_id not in DATASETS:

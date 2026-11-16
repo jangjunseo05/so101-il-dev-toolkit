@@ -22,6 +22,7 @@ from streamlit_autorefresh import st_autorefresh
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from lib import data_sources as ds
+from lib import demo_mode
 from lib import local_config
 from lib import process_manager as pm
 from lib.theme import AQUA
@@ -30,7 +31,7 @@ from lib.ui_components import get_logo_icon, render_brand_header, render_card_he
 # pipeline/camera_config.py의 스트리밍 포트 상수 재사용(§44) -- data_sources.py가
 # 이미 pipeline/2_qa를 sys.path에 넣는 것과 같은 패턴.
 sys.path.insert(0, str(ds.PROJECT_ROOT / "pipeline"))
-from camera_config import DATA_COLLECTION_STREAM_PORT  # noqa: E402
+from camera_config import DATA_COLLECTION_STREAM_PORT, WRIST_IMAGE_HEIGHT, WRIST_IMAGE_WIDTH  # noqa: E402
 
 st.set_page_config(page_title="① 데이터 수집", page_icon=get_logo_icon(), layout="wide")
 
@@ -73,7 +74,7 @@ settings = local_config.load_local_settings()
 # 자체를 조건부로 바꾸는 데 쓴다(카드를 분리하지 않음). check_conflict()
 # 로직 자체는 건드리지 않고 호출 시점만 앞으로 당김.
 conflict = None if job_status["running"] else pm.check_conflict(STAGE)
-port_missing = (not job_status["running"]) and not settings["leader_port"].strip()
+port_missing = (not demo_mode.ENABLED) and (not job_status["running"]) and not settings["leader_port"].strip()
 action_blocked = conflict is not None or port_missing
 
 # "이미 벌어진 사건"에 대한 경고(크래시)는 action 카드보다도 위, 페이지에서
@@ -98,13 +99,31 @@ with st.container(border=True):
             _reasons.append("리더암 포트가 설정되지 않음 (아래 '로컬 설정'에서 입력)")
         st.caption("⚠️ " + " · ".join(_reasons) + " — 해결 후 다시 시도하세요.")
 
-    st.info(
+    if not demo_mode.ENABLED:
+      st.info(
         "이 버튼은 텔레오퍼레이션 세션(MuJoCo 뷰어 + 카메라 미리보기 창)을 이 컴퓨터에 새 프로세스로 띄우는 것까지만 합니다. \n\n "
         "**실제 episode 녹화 시작/종료(S 키)와 폐기(X 키)는 뜨는 MuJoCo 뷰어 창에서 직접 키보드로 조작해야 합니다** ",
         icon="⌨️",
     )
 
-    if job_status["running"]:
+    # 대표 프로젝트(HOLD THE FLOW)에서 확인한 시연 원칙 -- ACT는 현재 장면만 보고
+    # 다음 1~2초 동작을 한꺼번에 예측하므로(과거·경과 시간 정보 없음), 멈춘 구간이나
+    # 머뭇거림이 데이터에 섞이면 같은 장면에 "계속 멈춤"과 "진행" 정답이 섞여
+    # 추론 때 제자리에서 떨거나 망설이는 원인이 된다.
+    with st.expander("📋 녹화 가이드 — 성공률을 높이는 시연 방식", expanded=False):
+        st.markdown(
+            "- **같은 조건에서 반복**: 물체는 매 episode 같은 위치에서 시작합니다(녹화 종료 시 자동 복귀). "
+            "팔도 매번 같은 시작 자세에서 출발하세요.\n"
+            "- **멈추지 말고 한 번에**: 잡기 → 들기 → 옮기기 → 놓기를 머뭇거림 없이 이어서 시연하세요. "
+            "중간에 멈춘 구간은 모델이 '계속 멈춤'을 배우는 원인이 됩니다.\n"
+            "- **비슷한 경로와 속도**: 매번 비슷한 궤적·속도로 움직이면 적은 데이터로도 성공률이 올라갑니다.\n"
+            "- **실수한 episode는 X로 버리기**: 놓치거나 다시 잡은 시연은 저장하지 마세요.\n"
+            "- **목표 수량**: 최소 50개 이상(대표 프로젝트 기준 20개 0/5 → 80개 5/5)."
+        )
+
+    if demo_mode.ENABLED:
+        demo_mode.render_locked("녹화는 실물 리더암을 USB로 연결한 컴퓨터에서만 할 수 있습니다.")
+    elif job_status["running"]:
         elapsed = time.time() - job_status["started_at"]
         c1, c2, c3 = st.columns(3)
         c1.metric("상태", "🔴 실행 중")
@@ -167,60 +186,93 @@ with st.container(border=True):
             except pm.JobConflictError as e:
                 st.error(str(e))
 
-# 2. 설정(settings) -- 행동 바로 다음, 여전히 눈에 잘 띄어야 함
-with st.container(border=True):
-    render_card_header("⚙️", "로컬 설정 (이 컴퓨터에만 저장됨)", "settings")
-    with st.expander("펼쳐서 편집", expanded=not job_status["running"]):
-        with st.form("local_settings_form"):
-            c1, c2 = st.columns(2)
-            _port_example = "예: COM5" if sys.platform == "win32" else "예: /dev/ttyACM0"
-            f_port = c1.text_input(f"리더암 시리얼 포트 ({_port_example})", value=settings["leader_port"])
-            f_id = c2.text_input("캘리브레이션 id", value=settings["leader_id"])
-            c3, c4 = st.columns(2)
-            f_repo_id = c3.text_input("repo_id", value=settings["repo_id"])
-            f_root = c4.text_input("데이터셋 저장 경로 (root)", value=settings["root"])
-            f_calib_dir = st.text_input("캘리브레이션 파일 디렉터리", value=settings["calibration_dir"])
-            f_task = st.text_input("task 설명", value=settings["task"])
-            if st.form_submit_button("💾 저장"):
-                local_config.save_local_settings(
-                    {
-                        "leader_port": f_port,
-                        "leader_id": f_id,
-                        "repo_id": f_repo_id,
-                        "root": f_root,
-                        "calibration_dir": f_calib_dir,
-                        "task": f_task,
-                    }
-                )
-                st.success("저장했습니다.")
-                st.rerun()
+if not demo_mode.ENABLED:
+    # 2. 설정(settings) -- 행동 바로 다음, 여전히 눈에 잘 띄어야 함
+    with st.container(border=True):
+        render_card_header("⚙️", "로컬 설정 (이 컴퓨터에만 저장됨)", "settings")
+        with st.expander("펼쳐서 편집", expanded=not job_status["running"]):
+            with st.form("local_settings_form"):
+                c1, c2 = st.columns(2)
+                _port_example = "예: COM5" if sys.platform == "win32" else "예: /dev/ttyACM0"
+                f_port = c1.text_input(f"리더암 시리얼 포트 ({_port_example})", value=settings["leader_port"])
+                f_id = c2.text_input("캘리브레이션 id", value=settings["leader_id"])
+                c3, c4 = st.columns(2)
+                f_repo_id = c3.text_input("repo_id", value=settings["repo_id"])
+                f_root = c4.text_input("데이터셋 저장 경로 (root)", value=settings["root"])
+                f_calib_dir = st.text_input("캘리브레이션 파일 디렉터리", value=settings["calibration_dir"])
+                f_task = st.text_input("task 설명", value=settings["task"])
+                if st.form_submit_button("💾 저장"):
+                    local_config.save_local_settings(
+                        {
+                            "leader_port": f_port,
+                            "leader_id": f_id,
+                            "repo_id": f_repo_id,
+                            "root": f_root,
+                            "calibration_dir": f_calib_dir,
+                            "task": f_task,
+                        }
+                    )
+                    st.success("저장했습니다.")
+                    st.rerun()
 
 # 3. 결과(results) -- 지금까지 쌓인 데이터의 현황
 with st.container(border=True):
     render_card_header("📊", "현재 데이터셋 현황", "success")
-    info = ds.get_dataset_info()
-    c1, c2, c3 = st.columns(3)
-    c1.metric("총 episode 수", info["total_episodes"])
-    c2.metric("총 frame 수", info["total_frames"])
-    c3.metric("fps", info["fps"])
+    _info_path = ds.DATASET_ROOT / "meta" / "info.json"
+    _episodes_path = ds.DATASET_ROOT / "meta" / "episodes" / "chunk-000" / "file-000.parquet"
+    # 새 컴퓨터에서 처음 실행하면 아직 녹화된 데이터셋이 없어 info.json을 읽다가
+    # 페이지 전체가 오류로 멈췄다 -- 첫 녹화 전에는 안내만 보여 준다.
+    if not _info_path.is_file() or not _episodes_path.is_file():
+        st.info("아직 저장된 episode가 없습니다. 위에서 녹화 세션을 시작해 첫 episode를 저장하면 여기에 현황이 표시됩니다.")
+    else:
+        info = ds.get_dataset_info()
+        c1, c2, c3 = st.columns(3)
+        c1.metric("총 episode 수", info["total_episodes"])
+        c2.metric("총 frame 수", info["total_frames"])
+        c3.metric("fps", info["fps"])
 
-    st.markdown("**episode별 길이**")
-    ep_df = ds.get_episode_lengths_df()
-    chart = (
-        alt.Chart(ep_df)
-        .mark_bar(color=AQUA, size=18)
-        .encode(
-            x=alt.X("episode_index:O", title="episode"),
-            y=alt.Y("length:Q", title="frame 수"),
-            tooltip=["episode_index", "length"],
+        st.markdown("**episode별 길이**")
+        ep_df = ds.get_episode_lengths_df()
+        chart = (
+            alt.Chart(ep_df)
+            .mark_bar(color=AQUA, size=18)
+            .encode(
+                x=alt.X("episode_index:O", title="episode"),
+                y=alt.Y("length:Q", title="frame 수"),
+                tooltip=["episode_index", "length"],
+            )
+            .properties(height=320)
         )
-        .properties(height=320)
-    )
-    st.altair_chart(chart, width='stretch')
-    st.caption("episode 11은 길이가 짧고 wrist_roll 변화가 전혀 없어 S 키 오조작으로 무효 판정됨 (QA 페이지 참고)")
+        st.altair_chart(chart, width='stretch')
+        st.caption("길이가 유난히 짧거나 긴 episode는 오조작일 수 있으니 ② QA 검증에서 확인하세요.")
 
-    if info["total_episodes"] > 0:
-        st.page_link("pages/2_QA_검증.py", label="다음: ② QA 검증하기", icon="➡️")
+        st.markdown("**episode 둘러보기**")
+        _ep_ids = ep_df["episode_index"].tolist()
+        _ep = st.selectbox("episode", options=_ep_ids, key="dc_browse_episode")
+        _preview = ds.get_episode_preview_path(int(_ep))
+        _left, _right = st.columns([2, 3]) if _preview else (None, st.container())
+        if _preview:
+            with _left:
+                st.video(str(_preview), loop=True, autoplay=True, muted=True)
+                st.caption("손목 카메라 (학습 입력 이미지)")
+        with _right:
+            _jdf = ds.get_episode_joint_df(int(_ep))
+            _joint_chart = (
+                alt.Chart(_jdf)
+                .mark_line(strokeWidth=1.6)
+                .encode(
+                    x=alt.X("frame:Q", title="frame (30fps)"),
+                    y=alt.Y("state:Q", title="관절각 (rad)"),
+                    color=alt.Color("joint:N", legend=alt.Legend(title=None, orient="bottom")),
+                    tooltip=["frame", "joint", alt.Tooltip("state:Q", format=".3f")],
+                )
+                .properties(height=300)
+            )
+            st.altair_chart(_joint_chart, width='stretch')
+            st.caption("6개 관절의 실제 위치(observation.state) — 매 episode 비슷한 궤적이면 시연이 일관된 것입니다.")
+
+        if info["total_episodes"] > 0:
+            st.page_link("pages/2_QA_검증.py", label="다음: ② QA 검증하기", icon="➡️")
 
 # 4. 메타정보(접힘) -- 코드/스키마/파라미터 설명, 필요할 때만 펼쳐봄
 with st.expander("(자세히 보기) 코드 구조 · 데이터 패킷 형태 · 실행 파라미터 "):
@@ -234,7 +286,7 @@ with st.expander("(자세히 보기) 코드 구조 · 데이터 패킷 형태 ·
 |---|---|
 | `load_or_create_dataset()` | 기존 `LeRobotDataset` 로드 또는 신규 생성 (손상 감지 시 사용자 확인 후에만 백업) |
 | `leader_action_to_radians()` | 리더암 실측 캘리브레이션 range → follower `ctrlrange` 비례 스케일링 (23절: 1:1 매핑 시 clip 발생 문제 해결) |
-| `randomize_pick_object()` | episode 종료(`S`) 시 물체를 접시 기준 범위 내 랜덤 위치로 재배치 |
+| `randomize_pick_object()` | `--randomize-object` 지정 시에만 episode 종료(`S`) 때 물체를 접시 기준 범위 내 랜덤 위치로 재배치. 기본값은 매 episode 고정 위치(추론과 동일)에서 시작 |
 | 메인 루프 | 리더 액션 읽기 → MuJoCo `ctrl` 적용 → 물리 스텝 → 30Hz로 카메라 프레임 캡처/녹화 |
 """
     )
@@ -244,8 +296,8 @@ with st.expander("(자세히 보기) 코드 구조 · 데이터 패킷 형태 ·
     st.table(
         {
             "key": ["action", "observation.state", "observation.images.wrist_cam"],
-            "dtype": ["float32", "float32", "image (480,640,3)"],
-            "shape": ["(6,)", "(6,)", "(480, 640, 3)"],
+            "dtype": ["float32", "float32", f"image ({WRIST_IMAGE_HEIGHT},{WRIST_IMAGE_WIDTH},3)"],
+            "shape": ["(6,)", "(6,)", f"({WRIST_IMAGE_HEIGHT}, {WRIST_IMAGE_WIDTH}, 3)"],
             "설명": ["6개 관절 목표값(라디안)", "6개 관절 현재값(라디안)", "손목 카메라 RGB 프레임"],
         }
     )

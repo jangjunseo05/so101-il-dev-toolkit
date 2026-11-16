@@ -1,0 +1,12 @@
+# 공개 데모(HF Space, CPU) 전용 의존성 -- GPU·MuJoCo·리더암 관련 패키지는 넣지 않는다.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.10.0+cpu
+lerobot==0.4.4
+streamlit==1.61.1
+streamlit-autorefresh==1.0.1
+altair==6.2.2
+pandas==2.3.3
+pyyaml
+psutil
+matplotlib
+pillow
