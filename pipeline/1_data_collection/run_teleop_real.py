@@ -19,7 +19,8 @@ lerobot.teleoperators.so_leader.SO101Leader로 실물 로봇과 통신한다.
 조작법:
   - 실물 리더암을 손으로 움직이면 MuJoCo 뷰어의 팔로워암이 그대로 추종한다.
   - S 키: episode 녹화 시작/종료(종료 시 LeRobot 데이터셋으로 저장하고,
-    pick_object를 place_plate 기준 랜덤 위치로 재배치).
+    pick_object를 초기 위치(scene.xml 기본 스폰 위치)로 복귀. --randomize-object를
+    주면 대신 place_plate 기준 랜덤 위치로 재배치).
   - X 키: 녹화 중인 episode를 저장하지 않고 버림(pick_object는 초기 위치로 복귀).
 
 녹화되는 데이터에는 관절 값(action/observation.state)뿐 아니라 팔로워 그리퍼에
@@ -502,6 +503,15 @@ def main():
     parser.add_argument("--task", default=DEFAULT_TASK, help="episode에 붙일 작업 설명(자연어)")
     parser.add_argument("--repo-id", default=DEFAULT_REPO_ID, help="LeRobot 데이터셋 repo_id")
     parser.add_argument("--root", default=DEFAULT_DATASET_ROOT, help="데이터셋 저장 경로")
+    parser.add_argument(
+        "--randomize-object",
+        action="store_true",
+        help=(
+            "episode 종료(S) 시 pick_object를 place_plate 기준 랜덤 위치로 재배치한다. "
+            "기본값(미지정)은 매 episode를 같은 초기 위치에서 시작하며, "
+            "run_inference_mujoco.py의 고정 스폰 위치와 일치한다."
+        ),
+    )
     args = parser.parse_args()
 
     # 외부(웹 대시보드 등)에서 이 프로세스를 정상 종료시키기 위한 신호 처리
@@ -776,7 +786,12 @@ def main():
                                     dataset.episode_buffer = None
                                     print("[REC] 빈 episode라 저장하지 않음")
                                 recording = False
-                                randomize_pick_object()
+                                # 기본값은 고정 위치(추론과 같은 scene.xml 스폰 위치)로
+                                # 복귀 -- 위치 일반화보다 같은 조건에서의 성공률을 우선할 때.
+                                if args.randomize_object:
+                                    randomize_pick_object()
+                                else:
+                                    reset_pick_object()
                             else:
                                 recording = True
                                 episode_frame_count = 0

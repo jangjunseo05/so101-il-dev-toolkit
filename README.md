@@ -14,7 +14,7 @@ pipeline/
 
 ### ① 데이터 수집 ([`pipeline/1_data_collection/`](pipeline/1_data_collection/))
 
-- `run_teleop_real.py` — 실물 SO-101 leader arm → MuJoCo 시뮬레이션 follower. `action`/`observation.state`와 손목 카메라 영상을 [LeRobot](https://github.com/huggingface/lerobot) `LeRobotDataset`(v3.0, parquet 기반)으로 녹화합니다. 에피소드마다 물체 위치를 무작위로 바꾸는 randomizer, 시작/폐기 키보드 조작, 실시간 카메라 미리보기를 포함합니다.
+- `run_teleop_real.py` — 실물 SO-101 leader arm → MuJoCo 시뮬레이션 follower. `action`/`observation.state`와 손목 카메라 영상을 [LeRobot](https://github.com/huggingface/lerobot) `LeRobotDataset`(v3.0, parquet 기반)으로 녹화합니다. 물체를 매 에피소드 같은 위치(추론과 동일)에서 시작하는 기본 모드와 `--randomize-object`로 켜는 위치 randomizer, 시작/폐기 키보드 조작, 실시간 카메라 미리보기를 포함합니다.
 - `run_teleop_real_to_real.py` — 실물 leader arm → 실물 follower arm (시뮬레이션 없음). USB 손목 카메라로 병 파지·따르기(grasp-and-pour) 시연 데이터를 수집하는 데 사용했으며, leader의 실측 관절 범위를 follower의 실측 캘리브레이션 범위에 맞춰 비례 스케일링합니다.
 - `run_teleop_follower.py` (repo 루트) — 반대 방향입니다. MuJoCo 뷰어에서 마우스로 움직이는 가상 leader arm이 시리얼로 실물 follower arm을 제어합니다. 텔레옵 전용이며 녹화는 하지 않습니다. ([아래 섹션](#leaderfollower-텔레옵-마우스-조작) 참고)
 
