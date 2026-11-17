@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from lib import data_sources as ds
 from lib import dataset_registry
 from lib import demo_mode
+from lib import preprocessing_view
 from lib import qa_snapshot
 from lib.ui_components import get_logo_icon, render_brand_header, render_card_header
 
@@ -50,8 +51,8 @@ profile = dataset_registry.get_profile(dataset_id)
 
 # 선택한 데이터셋이 아직 로컬에 없으면(새 컴퓨터 첫 실행 등) TeamRobotDataset이
 # Hugging Face Hub에서 찾으려다 404로 페이지 전체가 멈췄다 -- 안내 후 중단한다.
-if not (profile["dataset_root"] / "meta" / "info.json").is_file():
-    st.info(f"이 데이터셋이 아직 로컬에 없습니다: `{profile['dataset_root']}` — ① 데이터 수집에서 episode를 저장한 뒤 다시 열어 주세요.", icon="📭")
+if not ds.has_episodes(dataset_id):
+    st.info(f"이 데이터셋에 저장된 episode가 아직 없습니다: `{profile['dataset_root']}` — ① 데이터 수집에서 episode를 저장한 뒤 다시 열어 주세요.", icon="📭")
     st.stop()
 
 # z_thresh 기본값을 위젯 렌더보다 먼저 세션 상태에 심어둔다 -- 액션 카드
@@ -140,14 +141,10 @@ if snapshots:
         st.page_link("pages/3_ACT_학습.py", label="다음: ③ 학습 시작하기 →", icon="➡️")
 
 # 4. 메타정보(접힘) -- 코드 구조/이상치 사례/시각화/스냅샷 전체 이력
-with st.expander("(자세히 보기) 코드 구조 · 이상치 필터링 사례 · 시각화 산출물 · 스냅샷 이력"):
-    st.page_link(
-        "pages/5_전처리_구조.py",
-        label="🔍 이 파이프라인의 전처리 구조 보기 (이미지 리사이즈/증강, 액션 델타/청킹, 프레임 스태킹, 센서 동기화)",
-        icon="🔍",
-    )
-    st.divider()
+with st.expander("(자세히 보기) 전처리 구조 — 정규화, 이미지 리사이즈/증강, 액션 델타/청킹, 프레임 스태킹, 센서 동기화"):
+    preprocessing_view.render()
 
+with st.expander("(자세히 보기) 코드 구조 · 이상치 필터링 사례 · 시각화 산출물 · 스냅샷 이력"):
     st.subheader("코드 구조")
     st.table(
         {

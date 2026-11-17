@@ -19,11 +19,9 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lib import data_sources as ds
-from lib import demo_mode
-from lib import local_config
-from lib import next_action
+from lib import start_guide
 from lib.theme import STAGE_NAMES, STAGE_PAGES
-from lib.ui_components import get_logo_icon, render_brand_header, render_card_header, render_splash_screen
+from lib.ui_components import get_logo_icon, render_brand_header, render_splash_screen
 
 
 def home() -> None:
@@ -52,90 +50,37 @@ def home() -> None:
     st.title("🦾 SO-101 모방학습 파이프라인 대시보드")
     st.caption("DAPIER 내부용 모방학습 개발 키트: 텔레옵 데이터 수집 → QA/검증 → ACT 학습 → MuJoCo 추론")
 
-    _action = next_action.get_next_action()
-    with st.container(border=True):
-        render_card_header("", "다음 행동", "action")
-        st.page_link(_action["target_page"], label=_action["message"], icon=_action["icon"])
-
-    st.divider()
-    st.subheader("파이프라인 흐름")
-
-    cols = st.columns([3, 1, 3, 1, 3, 1, 3])
-    for i, name in enumerate(STAGE_NAMES):
-        with cols[i * 2]:
-            st.page_link(STAGE_PAGES[i], label=f"**{i + 1}. {name}**", width='stretch')
-        if i < len(STAGE_NAMES) - 1:
-            with cols[i * 2 + 1]:
-                st.markdown("<h2 style='text-align:center; margin-top:0.5em;'>→</h2>", unsafe_allow_html=True)
-
-    st.divider()
-    st.subheader("환경 상태")
-
-    if demo_mode.ENABLED:
-        st.caption(
-            "실제 사용 시에는 여기서 리더암 포트·캘리브레이션 파일·GPU 상태를 확인합니다. "
-            "공개 데모 서버에는 장비가 없어 이 확인을 건너뜁니다."
-        )
-        _render_health_summary()
-        return
-
-    _settings = local_config.load_local_settings()
-    _calib_path = Path(_settings["calibration_dir"]) / f"{_settings['leader_id']}.json"
-    _port_ok = bool(_settings["leader_port"].strip())
-    _calib_ok = _calib_path.is_file()
-
-    @st.cache_data(show_spinner=False)
-    def _check_cuda() -> tuple[bool, str]:
-        try:
-            import torch
-
-            return torch.cuda.is_available(), torch.__version__
-        except ImportError:
-            return False, "not installed"
-
-    _cuda_ok, _torch_version = _check_cuda()
-
-    e1, e2, e3 = st.columns(3)
-    with e1:
-        if _port_ok:
-            st.success("로컬 설정 저장됨", icon="✅")
-        else:
-            st.warning("리더암 포트 미설정", icon="⚠️")
-        st.caption("① 데이터 수집 페이지 → ⚙️ 로컬 설정에서 입력")
-    with e2:
-        if _calib_ok:
-            st.success("캘리브레이션 파일 있음", icon="✅")
-        else:
-            st.warning(f"캘리브레이션 파일 없음: {_calib_path}", icon="⚠️")
-        st.caption("docs/REAL_LEADER_SETUP.md 4단계 참고")
-    with e3:
-        if _cuda_ok:
-            st.success(f"GPU 사용 가능 (torch {_torch_version})", icon="✅")
-        else:
-            st.info(f"GPU 미사용 가능 (torch {_torch_version}) — ③④단계에만 필요", icon="ℹ️")
-        st.caption("③ ACT 학습 / ④ 추론 단계에서만 필요")
-
-    if not (_port_ok and _calib_ok):
-        st.info("처음 설정하는 경우 `docs/NEW_TEAMMATE_SETUP.md`를 참고하세요.", icon="🧭")
-
+    # 홈 = 헬스 요약(결과 한눈에) + 단계별 가이드(2026-11). 예전 홈의 '다음 행동'·'파이프라인
+    # 흐름'·'환경 상태'(포트·캘리브레이션·GPU)는 가이드의 단계 표시가 같은 역할을 해서 합쳤다.
     _render_health_summary()
+    st.divider()
+    _cuda_ok, _torch_version = _check_cuda()
+    start_guide.render(_cuda_ok, _torch_version)
 
     st.divider()
-    st.info(
-        "4단계 전부 이 대시보드에서 직접 시작/종료할 수 있습니다. \n\n"
-        "동시 실행 시 자원(시리얼 포트/GPU/MuJoCo 뷰어) 충돌은 `lib/process_manager.py`의 lock 시스템이 자동으로 막아줍니다.",
-        icon="🛠️",
+    st.caption(
+        "4단계 전부 이 대시보드에서 직접 시작/종료할 수 있습니다. 동시 실행 시 자원(시리얼 포트/GPU/MuJoCo 뷰어) "
+        "충돌은 `lib/process_manager.py`의 lock 시스템이 자동으로 막아줍니다."
     )
 
 
+@st.cache_data(show_spinner=False)
+def _check_cuda() -> tuple[bool, str]:
+    try:
+        import torch
+
+        return torch.cuda.is_available(), torch.__version__
+    except ImportError:
+        return False, "not installed"
+
+
 def _render_health_summary() -> None:
-    st.divider()
     st.subheader("파이프라인 헬스 요약")
     st.caption("터미널 로그 대신, 이 파이프라인이 실제로 정상 작동했다는 근거가 되는 핵심 수치만 모았습니다.")
 
     # 새 컴퓨터 첫 실행처럼 아직 녹화된 데이터셋이 없으면 info.json을 읽다가 홈 전체가
     # 오류로 멈췄다 -- 헬스 요약만 건너뛰고 안내를 보여 준다.
-    if not (ds.DATASET_ROOT / "meta" / "info.json").is_file():
+    if not ds.has_episodes():
         st.info("아직 녹화된 데이터셋이 없어 헬스 요약을 건너뜁니다. ① 데이터 수집에서 첫 episode를 저장하면 표시됩니다.", icon="📭")
         return
 
@@ -173,7 +118,8 @@ def _render_health_summary() -> None:
 
 
 # 사이드바 재구성(2026-08-17, 42-5절): pages/ 자동 스캔 -> st.navigation()
-# 명시 방식으로 전환. app/전처리 구조는 섹션 밖 최상단("" 키)에 항상 노출,
+# 명시 방식으로 전환. 홈(헬스 요약 + 단계별 가이드)은 섹션 밖 최상단("" 키)에 항상 노출
+# (전처리 구조는 2026-11에 ② QA 검증 페이지의 접힌 섹션으로 옮김),
 # 4단계 파이프라인은 "모방학습 실행" 접이식 섹션으로 묶음. 실행 테스트로
 # 확인된 사실(추측 아님, CLAUDE.md 42-5절):
 # - sidebar position에서도 dict 섹션이 실제 클릭 토글로 동작(공식 문서는
@@ -185,8 +131,7 @@ def _render_health_summary() -> None:
 # 두 곳에 따로 유지하지 않음.
 pages = {
     "": [
-        st.Page(home, title="app", default=True),
-        st.Page("pages/5_전처리_구조.py", title="전처리 구조"),
+        st.Page(home, title="홈", icon="🏠", default=True),
     ],
     "모방학습 실행": [st.Page(STAGE_PAGES[i], title=STAGE_NAMES[i]) for i in range(len(STAGE_NAMES))],
 }
