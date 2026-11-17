@@ -21,7 +21,8 @@ lerobot.teleoperators.so_leader.SO101Leader로 실물 로봇과 통신한다.
   - S 키: episode 녹화 시작/종료(종료 시 LeRobot 데이터셋으로 저장하고,
     pick_object를 초기 위치(scene.xml 기본 스폰 위치)로 복귀. --randomize-object를
     주면 대신 place_plate 기준 랜덤 위치로 재배치).
-  - X 키: 녹화 중인 episode를 저장하지 않고 버림(pick_object는 초기 위치로 복귀).
+  - X 키: 녹화 중인 episode를 저장하지 않고 버림. 녹화 중이 아니어도 pick_object를 초기 위치로 복귀.
+  - S로 녹화를 시작할 때도 먼저 pick_object를 초기 위치로 되돌린다(--randomize-object가 아니면).
 
 녹화되는 데이터에는 관절 값(action/observation.state)뿐 아니라 팔로워 그리퍼에
 달린 손목 카메라(wrist_cam)의 시각 데이터(observation.images.wrist_cam)도 포함된다.
@@ -34,6 +35,7 @@ import random
 import signal
 import sys
 import time
+import os
 import traceback
 from pathlib import Path
 
@@ -78,6 +80,14 @@ def _setup_file_logging() -> str:
         def fileno(self):
             return self._streams[0].fileno()
 
+    # 대시보드가 띄우면 stdout은 콘솔이 아니라 로그 파일이라 기본이 블록 버퍼링이다 -- 그러면
+    # [REC] 녹화 시작/저장 완료 줄이 한참 뒤에야 파일에 써져, 대시보드의 실시간 episode 카운터가
+    # 늦게 갱신된다(2026-11 확인). 줄 단위로 바로 쓰도록 바꾼다.
+    for _s in (sys.stdout, sys.stderr):
+        try:
+            _s.reconfigure(line_buffering=True)
+        except (AttributeError, ValueError):
+            pass
     sys.stdout = _Tee(sys.stdout, log_file)
     sys.stderr = _Tee(sys.stderr, log_file)
     print(f"[run_teleop_real] 세션 로그 시작: {log_path}")
@@ -262,6 +272,184 @@ def build_dataset_features() -> dict:
     }
 
 
+class LoopDiag:
+    """제어 루프 속도 진단 (2026-11).
+
+    녹화 프레임은 실제 시간이 아니라 '루프 1회 = loop_dt'로 세기 때문에(frame_accum += loop_dt),
+    루프가 느려지면 오류 없이 episode가 짧게 저장된다(실측: 19~45초 시연이 10~41프레임).
+    어느 구간이 느린지 알 수 있도록 구간별 시간을 재고,
+      - 녹화 중 3초 창에서 실제 루프 속도가 목표의 70% 미만이면 경고를 출력하고
+      - episode 저장 시 '실제 경과 시간 대비 저장 프레임' 비율을 출력한다(0.8 미만이면 ⚠).
+    """
+
+    SEGMENTS = ("get_action", "physics_view", "wrist_cam", "scene")
+    WINDOW_S = 3.0
+
+    def __init__(self, hz: float):
+        self.hz = hz
+        self.reset_episode()
+        self._reset_window()
+
+    def _reset_window(self):
+        self._win_start = time.time()
+        self._win_loops = 0
+        self._win_sum = {k: 0.0 for k in self.SEGMENTS}
+        self._win_max_loop = 0.0
+
+    def reset_episode(self):
+        self.ep_start = time.time()
+        self.loops = 0
+        self.sum = {k: 0.0 for k in self.SEGMENTS}
+        self.max = {k: 0.0 for k in self.SEGMENTS}
+        self.warned = 0
+
+    def add(self, seg: str, dt: float):
+        self.sum[seg] += dt
+        self.max[seg] = max(self.max[seg], dt)
+        self._win_sum[seg] += dt
+
+    def end_loop(self, loop_time: float, recording: bool):
+        self.loops += 1
+        self._win_loops += 1
+        self._win_max_loop = max(self._win_max_loop, loop_time)
+        elapsed = time.time() - self._win_start
+        if elapsed < self.WINDOW_S:
+            return
+        rate = self._win_loops / elapsed
+        if recording and rate < 0.7 * self.hz:
+            parts = ", ".join(f"{k} {1000 * v / max(self._win_loops, 1):.0f}ms" for k, v in self._win_sum.items())
+            print(
+                f"[경고] 제어 루프 느림: 최근 {elapsed:.0f}초 실제 {rate:.1f}Hz (목표 {self.hz:.0f}Hz), "
+                f"최장 루프 {1000 * self._win_max_loop:.0f}ms | 구간 평균: {parts} "
+                "-- 이 동안 녹화 프레임이 실제보다 적게 쌓입니다",
+                flush=True,
+            )
+            self.warned += 1
+        self._reset_window()
+
+    def summary(self, frames: int, fps: float) -> tuple[str, float]:
+        wall = max(time.time() - self.ep_start, 1e-6)
+        ratio = frames / (wall * fps)
+        n = max(self.loops, 1)
+        parts = ", ".join(
+            f"{k} 평균 {1000 * self.sum[k] / n:.0f}ms/최대 {1000 * self.max[k]:.0f}ms" for k in self.SEGMENTS
+        )
+        return (
+            f"실제 {wall:.1f}초 동안 {frames}프레임(기대 {wall * fps:.0f}, 비율 {ratio:.2f}), "
+            f"루프 {self.loops / wall:.1f}Hz | {parts}",
+            ratio,
+        )
+
+
+class SceneClipWriter:
+    """녹화 중인 episode의 3인칭 MuJoCo 화면(브라우저 스트리밍과 같은 기본 시점, 15fps)을
+    episode마다 mp4로 저장한다(2026-11, 대시보드 '수집 데이터 둘러보기'에서 보기 위함).
+
+    학습 데이터(LeRobotDataset)에는 넣지 않는다 -- 데이터셋 옆 `<root>_scene/` 폴더에
+    `episode_XXXXXX.mp4`(데이터셋 episode 번호와 같음)로 따로 둔다. 데이터셋 형식과
+    학습 입력은 그대로다. 실패해도 녹화에는 영향이 없도록 모든 오류를 삼키고 로그만 남긴다.
+    """
+
+    def __init__(self, dataset_root: str, fps: float):
+        root = os.path.normpath(dataset_root)
+        self.dir = os.path.join(os.path.dirname(root), os.path.basename(root) + "_scene")
+        self.fps = int(round(fps))
+        self._container = None
+        self._stream = None
+        self._tmp = None
+
+    @property
+    def active(self) -> bool:
+        return self._container is not None
+
+    def start(self, episode_index: int) -> None:
+        self.abort()
+        try:
+            import av
+
+            os.makedirs(self.dir, exist_ok=True)
+            self._tmp = os.path.join(self.dir, f"episode_{episode_index:06d}.tmp.mp4")
+            self._container = av.open(self._tmp, mode="w")
+            self._stream = None
+        except Exception:
+            print("[run_teleop_real] 3인칭 영상 저장 시작 실패(녹화는 계속):", flush=True)
+            traceback.print_exc()
+            self._container = None
+
+    def add(self, rgb) -> None:
+        if self._container is None:
+            return
+        try:
+            import av
+
+            if self._stream is None:
+                self._stream = self._container.add_stream("libx264", rate=self.fps)
+                self._stream.height = rgb.shape[0] - rgb.shape[0] % 2
+                self._stream.width = rgb.shape[1] - rgb.shape[1] % 2
+                self._stream.pix_fmt = "yuv420p"
+                self._stream.options = {"crf": "26", "preset": "ultrafast"}
+            frame = av.VideoFrame.from_ndarray(
+                np.ascontiguousarray(rgb[: self._stream.height, : self._stream.width]), format="rgb24"
+            )
+            for packet in self._stream.encode(frame):
+                self._container.mux(packet)
+        except Exception:
+            print("[run_teleop_real] 3인칭 영상 프레임 저장 실패(녹화는 계속):", flush=True)
+            traceback.print_exc()
+            self.abort()
+
+    def finish(self, episode_index: int) -> None:
+        """저장된 episode 번호로 파일을 확정한다."""
+        if self._container is None:
+            return
+        tmp = self._tmp
+        try:
+            if self._stream is not None:
+                for packet in self._stream.encode():
+                    self._container.mux(packet)
+            self._container.close()
+            self._container = None
+            final = os.path.join(self.dir, f"episode_{episode_index:06d}.mp4")
+            if self._stream is None:  # 프레임이 하나도 없었음
+                os.remove(tmp)
+            else:
+                os.replace(tmp, final)
+                print(f"[REC] 3인칭 영상 저장: {final}", flush=True)
+        except Exception:
+            print("[run_teleop_real] 3인칭 영상 마무리 실패(데이터셋 저장에는 영향 없음):", flush=True)
+            traceback.print_exc()
+            self.abort()
+
+    def abort(self) -> None:
+        """버린 episode의 영상은 지운다."""
+        if self._container is not None:
+            try:
+                self._container.close()
+            except Exception:
+                pass
+        self._container = None
+        self._stream = None
+        if self._tmp and os.path.exists(self._tmp):
+            try:
+                os.remove(self._tmp)
+            except OSError:
+                pass
+        self._tmp = None
+
+
+def discard_episode_buffer(dataset: LeRobotDataset) -> None:
+    """녹화 중인 episode를 버린다(X 키, 또는 프레임 없이 S로 끝낸 경우).
+
+    예전에는 `dataset.episode_buffer = None`만 해서, 녹화 중에 디스크로 먼저 써 둔 손목 카메라
+    PNG(images/observation.images.wrist_cam/episode-XXXXXX/)가 그대로 남았다(2026-11: 버린
+    episode 하나에 1043장). 저장된 episode가 없는데 폴더에 파일이 남아 다음 세션이 데이터셋을
+    '손상'으로 판단하는 원인이 됐다. lerobot 공식 `clear_episode_buffer(delete_images=True)`로
+    버퍼와 임시 이미지를 함께 지운다(save_episode()가 끝에서 부르는 것과 같은 정리)."""
+    if dataset.episode_buffer is None:
+        return
+    dataset.clear_episode_buffer(delete_images=len(dataset.meta.image_keys) > 0)
+
+
 def load_or_create_dataset(repo_id: str, root: str) -> LeRobotDataset:
     import json
     import os
@@ -291,8 +479,35 @@ def load_or_create_dataset(repo_id: str, root: str) -> LeRobotDataset:
             with open(info_path, encoding="utf-8") as f:
                 info = json.load(f)
             total_episodes = info.get("total_episodes", 0)
-            if total_episodes == 0:
-                backup = root.rstrip("/\\") + "_corrupted"
+            # 녹화 세션을 열었다가 아무것도 저장하지 않고 닫으면 info.json 하나만 남는다(2026-11 확인).
+            # 이때는 잃을 데이터가 전혀 없으므로 묻지 않고 옆 _backups/로 옮긴(지우지 않음) 뒤 새로 만든다.
+            # 대시보드가 띄운 세션은 콘솔 입력을 받을 수 없어, 아래 y/N 질문에서 끝없이 멈춰 있었다.
+            # images/ 아래 PNG는 저장 전 episode의 임시 프레임이다(save_episode()가 parquet에 넣은 뒤
+            # 지움). total_episodes=0이면 저장된 episode가 하나도 없으므로 이것도 잃을 데이터가 아니다
+            # -- 예전 버전이 X로 버린 episode의 임시 이미지를 남겼던 경우(2026-11, 1043장).
+            images_dir = os.path.normpath(os.path.join(root, "images"))
+            other_files = [
+                os.path.join(d, n)
+                for d, _, names in os.walk(root)
+                for n in names
+                if os.path.normpath(os.path.join(d, n)) != os.path.normpath(info_path)
+                and not os.path.normpath(d).startswith(images_dir)
+            ]
+            had_temp_images = os.path.isdir(images_dir)
+            if total_episodes == 0 and not other_files:
+                backup_dir = os.path.join(os.path.dirname(root.rstrip("/\\")), "_backups")
+                os.makedirs(backup_dir, exist_ok=True)
+                backup = os.path.join(
+                    backup_dir, os.path.basename(root.rstrip("/\\")) + time.strftime("_empty_%Y%m%d_%H%M%S")
+                )
+                shutil.move(root, backup)
+                print(
+                    f"[run_teleop_real] 저장된 episode가 없는 빈 데이터셋(info.json"
+                    f"{'과 저장 전 임시 이미지' if had_temp_images else ''}만 있음)이라 "
+                    f"{backup} 로 옮기고 새로 만듭니다."
+                )
+            elif total_episodes == 0:
+                backup = root.rstrip("/\\") + time.strftime("_corrupted_%Y%m%d_%H%M%S")
                 print(
                     f"[run_teleop_real] 경고: {root} 이 손상된 상태로 감지됨 "
                     f"(meta/info.json total_episodes=0, 로딩 실패 사유: {exc}). "
@@ -304,13 +519,16 @@ def load_or_create_dataset(repo_id: str, root: str) -> LeRobotDataset:
                         "그 외 입력(또는 Enter)은 취소하고 종료합니다 [y/N]: "
                     )
                 except EOFError:
-                    # 비대화형 실행(입력을 받을 수 없는 환경) -- 취소와 동일하게 처리
+                    # 비대화형 실행(대시보드 등 입력을 받을 수 없는 환경) -- 취소와 동일하게 처리
                     answer = ""
+                    print(
+                        "\n[run_teleop_real] 입력을 받을 수 없는 실행(대시보드)이라 취소합니다. "
+                        f"{root} 안의 파일을 직접 확인하거나, 터미널에서 이 스크립트를 실행해 y로 답하세요."
+                    )
                 if answer.strip().lower() != "y":
                     print(f"[run_teleop_real] 사용자 확인 없음 -- {root} 을 건드리지 않고 종료합니다.")
                     raise SystemExit(1)
-                if os.path.exists(backup):
-                    shutil.rmtree(backup)
+                # 백업 이름에 시각을 넣어 이전 백업을 지우지 않는다(예전엔 같은 이름이면 rmtree로 덮어씀)
                 shutil.move(root, backup)
                 print(f"[run_teleop_real] 실행됨: {root} -> {backup} 백업 후 새 데이터셋 생성 진행")
             else:
@@ -722,11 +940,30 @@ def main():
 
         control = RecorderControl()
 
+        # 같은 키를 1초 안에 다시 받으면 무시한다(2026-11). 키를 조금 길게 누르면 Windows 키 반복이
+        # 약 0.5초 뒤 같은 키를 또 보내서, S 한 번에 '녹화 시작 → 0.6초 뒤 저장'이 되어 0.5~1.5초짜리
+        # episode가 대량으로 저장됐다(실측: 15~42프레임, 루프 속도는 정상 44Hz).
+        key_debounce_s = 1.0
+        last_key_time = {}
+        # 녹화 시작 직후 S로 저장되는 것 자체를 막는다(2026-11). 1초 디바운스 뒤에도 시작 1.2~4.7초 만에
+        # 두 번째 S가 들어와 짧은 episode가 계속 저장됐다. MuJoCo 창에 녹화 상태 표시가 없어 시작됐는지
+        # 모르고 S를 한 번 더 누른 것이 유력한 원인 -- 창 위에 상태를 표시(set_texts)하고, 시작 후
+        # MIN_RECORD_S 안의 S는 무시한다(실제 시연은 16~22초). 버리려면 X.
+        MIN_RECORD_S = 3.0
+
         def key_callback(keycode):
             # 뷰어의 내부 렌더 스레드에서 호출된다. 여기서 예외가 새어나가면 그
             # 스레드가 조용히 죽으면서 뷰어 창이 아무 설명 없이 닫혀버릴 수 있으므로
             # 반드시 이 안에서 잡아 로그만 남긴다.
             try:
+                if keycode in (KEY_TOGGLE_RECORD, KEY_DISCARD_EPISODE):
+                    now = time.time()
+                    name = chr(keycode)
+                    if now - last_key_time.get(keycode, 0.0) < key_debounce_s:
+                        print(f"[KEY] {name} 무시(1초 안에 반복) t={now:.2f}", flush=True)
+                        return  # 키 반복·두 번 눌림 무시
+                    last_key_time[keycode] = now
+                    print(f"[KEY] {name} 수신 t={now:.2f}", flush=True)
                 if keycode == KEY_TOGGLE_RECORD:
                     control.toggle_requested = True
                 elif keycode == KEY_DISCARD_EPISODE:
@@ -740,20 +977,50 @@ def main():
         print(f"리더암 포트: {args.port}  (id={args.id})")
         print(f"제어 주기: {args.hz} Hz")
         print(
-            f"S 키: episode 녹화 시작/종료(종료 시 물체 랜덤 재배치)   "
-            f"X 키: 녹화 중인 episode 버리기(초기 위치로 복귀) (task='{args.task}')"
+            f"S 키: episode 녹화 시작/종료(종료 시 물체 "
+            f"{'랜덤 재배치' if args.randomize_object else '시작 위치로 복귀'})   "
+            f"X 키: 녹화 중이면 버리기 + 물체 시작 위치로 복귀(대기 중에도 복귀) (task='{args.task}')"
         )
         if preview is not None:
             print(f"손목 카메라({WRIST_CAMERA}) 미리보기 창이 열립니다.")
         print("=" * 60)
 
         recording = False
+        record_start_time = 0.0
+        overlay_next = 0.0
         episode_frame_count = 0
         frame_accum = 0.0
         frame_interval = 1.0 / RECORD_FPS
         loop_dt = 1.0 / args.hz
         scene_frame_accum = 0.0
         scene_frame_interval = 1.0 / SCENE_STREAM_FPS
+        scene_clip = SceneClipWriter(args.root, SCENE_STREAM_FPS)
+        diag = LoopDiag(args.hz)
+
+        def show_overlay(viewer, text_left: str, text_right: str) -> None:
+            """MuJoCo 창 왼쪽 위에 녹화 상태를 표시한다(MuJoCo 폰트는 ASCII만 그려서 영문)."""
+            try:
+                viewer.set_texts(
+                    (mujoco.mjtFont.mjFONT_BIG, mujoco.mjtGridPos.mjGRID_TOPLEFT, text_left, text_right)
+                )
+            except Exception:
+                pass  # 표시 실패는 녹화에 영향 없음
+
+        def report_episode_timing():
+            text, ratio = diag.summary(episode_frame_count, RECORD_FPS)
+            print(f"[REC] 루프 진단: {text}", flush=True)
+            if episode_frame_count < 2 * RECORD_FPS:
+                print(
+                    f"[REC] ⚠ 2초 미만으로 저장됨({episode_frame_count}프레임) -- S를 두 번 누른 것 같으면 "
+                    "① 데이터 수집의 episode 목록에서 삭제하세요.",
+                    flush=True,
+                )
+            elif ratio < 0.8:
+                print(
+                    f"[REC] ⚠ 이 episode는 실제 시연보다 짧게 기록됨(비율 {ratio:.2f}) -- 제어 루프가 느렸습니다. "
+                    "학습 데이터로는 쓰지 말고 ① 데이터 수집의 episode 목록에서 삭제하세요.",
+                    flush=True,
+                )
 
         try:
             with mujoco.viewer.launch_passive(model, data, key_callback=key_callback) as viewer:
@@ -763,7 +1030,14 @@ def main():
                     try:
                         if control.toggle_requested:
                             control.toggle_requested = False
-                            if recording:
+                            if recording and time.time() - record_start_time < MIN_RECORD_S:
+                                print(
+                                    f"[REC] 녹화 시작 {time.time() - record_start_time:.1f}초 만의 S는 무시합니다"
+                                    f"({MIN_RECORD_S:.0f}초 이내 -- 실수로 저장되는 것 방지). 녹화는 계속됩니다. "
+                                    "버리려면 X.",
+                                    flush=True,
+                                )
+                            elif recording:
                                 if episode_frame_count > 0:
                                     # dataset.save_episode()는 datasets 라이브러리의
                                     # Map() 인코딩을 동기적으로 돌려 프레임 수에 따라
@@ -777,13 +1051,18 @@ def main():
                                         "몇 초 걸릴 수 있음 -- 이 동안 창이 잠깐 "
                                         "'응답 없음'처럼 보여도 정상입니다)"
                                     )
+                                    report_episode_timing()  # 저장(수 초) 전에 녹화 구간 시간만 잰다
+                                    show_overlay(viewer, "SAVING...", f"episode {dataset.meta.total_episodes}")
+                                    viewer.sync()
                                     dataset.save_episode()
+                                    scene_clip.finish(dataset.meta.total_episodes - 1)
                                     print(
                                         f"[REC] 저장 완료: {episode_frame_count} frames "
                                         f"(총 {dataset.meta.total_episodes} episodes)"
                                     )
                                 else:
-                                    dataset.episode_buffer = None
+                                    discard_episode_buffer(dataset)
+                                    scene_clip.abort()
                                     print("[REC] 빈 episode라 저장하지 않음")
                                 recording = False
                                 # 기본값은 고정 위치(추론과 같은 scene.xml 스폰 위치)로
@@ -793,21 +1072,36 @@ def main():
                                 else:
                                     reset_pick_object()
                             else:
+                                # 녹화를 시작하기 전에 물체를 시작 위치로 되돌린다(2026-11). 녹화하지
+                                # 않는 동안 팔로 물체를 건드려도 모든 episode가 같은 위치에서 시작하게 --
+                                # 이전에는 S/X로 끝날 때만 리셋해서, 그 사이에 밀린 위치에서 시작될 수 있었다.
+                                # --randomize-object일 때는 직전 종료 시 뽑은 랜덤 위치를 유지한다.
+                                if not args.randomize_object:
+                                    reset_pick_object()
                                 recording = True
+                                record_start_time = time.time()
                                 episode_frame_count = 0
                                 frame_accum = 0.0
-                                print(f"[REC] 녹화 시작 (episode {dataset.meta.total_episodes})")
+                                scene_clip.start(dataset.meta.total_episodes)
+                                scene_frame_accum = scene_frame_interval  # 시작 화면(물체 복귀 직후)을 첫 프레임으로
+                                diag.reset_episode()
+                                print(f"[REC] 녹화 시작 (episode {dataset.meta.total_episodes})", flush=True)
 
                         if control.discard_requested:
                             control.discard_requested = False
                             if recording:
-                                dataset.episode_buffer = None
+                                discard_episode_buffer(dataset)
+                                scene_clip.abort()
                                 recording = False
                                 episode_frame_count = 0
-                                print("[REC] episode 버림")
-                                reset_pick_object()
+                                print("[REC] episode 버림", flush=True)
+                            # 녹화 중이 아니어도 X는 물체를 시작 위치로 되돌린다(예전엔 녹화 중일 때만 동작해서
+                            # 대기 중에 X를 눌러도 아무 일도 일어나지 않았음)
+                            reset_pick_object()
 
+                        _t = time.time()
                         action = leader.get_action()
+                        diag.add("get_action", time.time() - _t)
                         targets = leader_action_to_radians(
                             action, gripper_range, leader_deg_ranges, follower_ctrl_ranges
                         )
@@ -830,9 +1124,24 @@ def main():
                         print("[run_teleop_real] 제어 스텝 중 오류(이번 프레임 건너뜀):", flush=True)
                         traceback.print_exc()
 
+                    if time.time() >= overlay_next:  # 창 위 상태 표시는 초당 5번만 갱신
+                        overlay_next = time.time() + 0.2
+                        if recording:
+                            show_overlay(
+                                viewer,
+                                f"REC  episode {dataset.meta.total_episodes}  {time.time() - record_start_time:5.1f} s",
+                                "S: save   X: discard",
+                            )
+                        else:
+                            show_overlay(
+                                viewer, f"READY   saved {dataset.meta.total_episodes} episodes", "S: start recording"
+                            )
+                    _t = time.time()
                     for _ in range(substeps):
                         mujoco.mj_step(model, data)
                     viewer.sync()
+                    diag.add("physics_view", time.time() - _t)
+                    _t = time.time()
 
                     # 손목 카메라 렌더링은 녹화 여부와 무관하게 항상 RECORD_FPS
                     # 주기로 수행해 미리보기 창이 녹화 중이 아닐 때도 계속 갱신되게
@@ -877,37 +1186,55 @@ def main():
                     except Exception:
                         print("[run_teleop_real] 카메라 프레임 처리 중 오류(이번 프레임 건너뜀):", flush=True)
                         traceback.print_exc()
+                    diag.add("wrist_cam", time.time() - _t)
+                    _t = time.time()
 
                     # 브라우저 스트리밍용 씬 렌더 -- wrist_cam 녹화 경로와는 독립된
                     # accumulator/try-except를 쓴다. 이 블록이 실패하거나(해상도 등
                     # 어떤 이유로든) 스트리밍 서버가 아예 없어도 위 녹화 경로에는
                     # 어떤 영향도 주지 않는다(순수 모니터링용이라 AssertionError로
                     # 세션을 중단시키지도 않음 -- wrist_cam 블록과의 의도적인 차이).
-                    if mjpeg_server is not None:
+                    # 녹화 중이면 같은 3인칭 프레임을 episode별 mp4(SceneClipWriter)에도 쓴다.
+                    if mjpeg_server is not None or scene_clip.active:
                         try:
                             scene_frame_accum += loop_dt
                             if scene_frame_accum >= scene_frame_interval:
                                 scene_frame_accum -= scene_frame_interval
                                 scene_renderer.update_scene(data, camera=scene_cam)
-                                mjpeg_server.publish_frame(scene_renderer.render())
+                                scene_rgb = scene_renderer.render()
+                                if mjpeg_server is not None:
+                                    mjpeg_server.publish_frame(scene_rgb)
+                                if recording:
+                                    scene_clip.add(scene_rgb)
                         except Exception:
                             print(
                                 "[run_teleop_real] 스트리밍 프레임 렌더 중 오류(이번 프레임 건너뜀, 녹화엔 영향 없음):",
                                 flush=True,
                             )
                             traceback.print_exc()
+                    diag.add("scene", time.time() - _t)
+                    diag.end_loop(time.time() - step_start, recording)
 
                     time_until_next_step = loop_dt - (time.time() - step_start)
                     if time_until_next_step > 0:
                         time.sleep(time_until_next_step)
 
                 if recording and episode_frame_count > 0:
+                    report_episode_timing()
                     dataset.save_episode()
+                    scene_clip.finish(dataset.meta.total_episodes - 1)
                     print(
                         f"[REC] 종료 시 자동 저장: {episode_frame_count} frames "
                         f"(총 {dataset.meta.total_episodes} episodes)"
                     )
         finally:
+            # 오류로 빠져나온 경우처럼 저장되지 않은 프레임이 버퍼에 남아 있으면, 디스크에 먼저 써 둔
+            # 임시 PNG까지 정리한다(남겨 두면 다음 세션이 데이터셋을 '손상'으로 판단함).
+            # 정상 종료(창 닫기·대시보드 종료) 중이던 녹화는 위에서 이미 자동 저장되어 버퍼가 비어 있다.
+            if dataset.episode_buffer is not None and dataset.episode_buffer.get("size", 0) > 0:
+                print("[REC] 저장되지 않은 녹화 프레임을 정리합니다(임시 이미지 삭제)")
+                discard_episode_buffer(dataset)
+            scene_clip.abort()  # 저장으로 확정되지 않은 3인칭 영상(임시 파일)은 남기지 않음
             print("[run_teleop_real] dataset.finalize() 호출 시작")
             dataset.finalize()
             print("[run_teleop_real] dataset.finalize() 호출 완료")

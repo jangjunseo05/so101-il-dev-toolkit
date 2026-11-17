@@ -21,8 +21,11 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from lib import calibration_ui
 from lib import data_sources as ds
+from lib import dataset_registry
 from lib import demo_mode
+from lib import episode_manager
 from lib import local_config
 from lib import process_manager as pm
 from lib.theme import AQUA
@@ -75,7 +78,13 @@ settings = local_config.load_local_settings()
 # 로직 자체는 건드리지 않고 호출 시점만 앞으로 당김.
 conflict = None if job_status["running"] else pm.check_conflict(STAGE)
 port_missing = (not demo_mode.ENABLED) and (not job_status["running"]) and not settings["leader_port"].strip()
-action_blocked = conflict is not None or port_missing
+# 캘리브레이션 파일이 없으면 run_teleop_real.py가 콘솔 대화형 캘리브레이션(Enter 입력)으로
+# 들어가는데, 대시보드가 띄운 프로세스에는 콘솔 입력을 줄 수 없어 멈춘다 -- 아래
+# '리더암 캘리브레이션' 카드에서 먼저 만들게 한다.
+calib_missing = (
+    (not demo_mode.ENABLED) and (not job_status["running"]) and not calibration_ui.calibration_exists(settings)
+)
+action_blocked = conflict is not None or port_missing or calib_missing
 
 # "이미 벌어진 사건"에 대한 경고(크래시)는 action 카드보다도 위, 페이지에서
 # 가장 먼저 눈에 띄는 위치에 독립 카드로 둔다 -- 새 시도를 시작하기 전에
@@ -88,6 +97,10 @@ if crash_tail:
         with st.expander("마지막 로그 보기(크래시 시점 근처)", expanded=True):
             st.code(crash_tail, language=None)
 
+# 0. 리더암 캘리브레이션 -- 녹화 전에 리더암마다 한 번. 웹 버튼으로 단계를 넘긴다.
+if not demo_mode.ENABLED and not job_status["running"]:
+    calibration_ui.render(settings, port_missing=not settings["leader_port"].strip())
+
 # 1. 행동(action) -- 페이지에서 가장 먼저 해야 할 일
 with st.container(border=True):
     render_card_header("🔴", "녹화 세션 제어", "warning" if action_blocked else "action")
@@ -97,6 +110,8 @@ with st.container(border=True):
             _reasons.append(f"'{conflict}'가 겹치는 자원(MuJoCo 뷰어/GPU 등)을 사용 중")
         if port_missing:
             _reasons.append("리더암 포트가 설정되지 않음 (아래 '로컬 설정'에서 입력)")
+        if calib_missing:
+            _reasons.append("리더암 캘리브레이션 파일 없음 (위 '리더암 캘리브레이션'에서 진행)")
         st.caption("⚠️ " + " · ".join(_reasons) + " — 해결 후 다시 시도하세요.")
 
     if not demo_mode.ENABLED:
@@ -125,10 +140,30 @@ with st.container(border=True):
         demo_mode.render_locked("녹화는 실물 리더암을 USB로 연결한 컴퓨터에서만 할 수 있습니다.")
     elif job_status["running"]:
         elapsed = time.time() - job_status["started_at"]
+        # 녹화 로그의 [REC] 줄에서 현재 상태와 저장 개수를 읽는다(2초마다 아래 자동 갱신)
+        _rec = episode_manager.recording_status(job_status.get("log_path"))
+        _state_label = {"recording": "🔴 녹화 중", "saving": "💾 저장 중", "idle": "⏸ 대기 (S로 시작)"}[_rec["state"]]
+        if _rec["state"] == "recording" and _rec["current_ep"] is not None:
+            _state_label += f" — episode {_rec['current_ep']}"
+        _total = _rec["total"]
+        if _total is None:  # 이번 세션에 아직 저장한 게 없으면 데이터셋 메타에서 읽는다
+            _total = episode_manager.episode_table().shape[0] if episode_manager.dataset_exists() else 0
         c1, c2, c3 = st.columns(3)
-        c1.metric("상태", "🔴 실행 중")
-        c2.metric("PID", job_status["pid"])
+        c1.metric("지금", _state_label)
+        c2.metric("저장된 episode", f"{_total} / 50", f"이번 세션 +{_rec['saved_this_session']}")
         c3.metric("경과 시간", f"{int(elapsed // 60)}분 {int(elapsed % 60)}초")
+        if _rec["state"] == "recording" and _rec["slow_warning"]:
+            st.warning("**녹화 루프가 느려지고 있습니다** — 이 episode는 실제보다 짧게 기록될 수 있습니다. "
+                       "X로 버리고 다시 녹화하는 것을 권장합니다.\n\n`" + _rec["slow_warning"][:300] + "`", icon="🐢")
+        if _rec["state"] != "recording" and _rec["short_saved_warning"]:
+            st.error("**방금 저장한 episode가 실제 시연보다 짧게 기록됐습니다.** 아래 episode 목록에서 삭제하세요.\n\n`"
+                     + _rec["short_saved_warning"][:300] + "`", icon="⚠️")
+        st.caption(
+            "**MuJoCo 창을 클릭한 상태**에서(손목 카메라 창이 선택돼 있으면 키가 안 먹음) "
+            "**S** 녹화 시작(물체가 시작 위치로 돌아감) → 시연 → **S** 저장 · "
+            "실수했으면 **X**(버리기 + 물체 복귀, 대기 중에도 복귀) 후 다시 **S** · 끝낼 때는 녹화 중이 아닐 때 MuJoCo 창을 닫거나 아래 세션 종료 "
+            "(녹화 중에 닫으면 그때까지가 자동 저장됨)"
+        )
 
         # 브라우저 내 라이브 스트리밍(§44) -- MuJoCo 네이티브 창을 대체하는 게
         # 아니라 추가하는 것. S/X 키 녹화 조작은 여전히 네이티브 창에서만 가능하다
@@ -152,12 +187,19 @@ with st.container(border=True):
 
         st.markdown("**⏹ 세션 강제 종료**")
         st.caption(
-            "정상 종료를 먼저 시도합니다(포트 닫기 등 정리 시간 최대 5초) — 그래도 안 끝나면 강제 종료로 전환합니다. "
-            "MuJoCo 뷰어에서 S로 저장하지 않은, 녹화 중이던 episode는 이 종료로 유실됩니다."
+            "정상 종료를 먼저 시도하고, 녹화 중이던 episode 저장과 데이터셋 마무리(finalize)가 끝날 때까지 최대 2분 기다립니다. "
+            "그래도 안 끝날 때만 강제 종료합니다(강제 종료되면 이번 세션 데이터 파일이 깨질 수 있음). "
+            "**녹화 중이던 episode는 그때까지의 프레임으로 자동 저장됩니다**(run_teleop_real.py 동작). "
+            "중간에 멈춘 시연을 남기고 싶지 않으면 먼저 MuJoCo 창에서 **X**로 버린 뒤 종료하세요. "
+            "가장 안전한 종료는 녹화 중이 아닐 때 MuJoCo 창을 닫는 것입니다."
         )
-        confirm = st.checkbox("녹화 중인 episode가 유실될 수 있음을 이해했습니다", key="dc_confirm_stop")
+        confirm = st.checkbox("녹화 중이던 episode는 자동 저장되거나(정상 종료) 유실될 수 있음(강제 종료)을 이해했습니다",
+                              key="dc_confirm_stop")
         if st.button("⏹ 세션 강제 종료", disabled=not confirm, type="primary"):
-            pm.stop_job(STAGE, graceful=True)
+            # 정상 종료 신호 뒤 녹화 중이던 episode 저장(수 초~10초 이상) + finalize()가 끝날 때까지 기다린다.
+            # 예전 5초 제한은 저장 도중 강제 종료해 data parquet가 footer 없이 깨졌다(2026-11 실측).
+            with st.spinner("정상 종료 중… 녹화 중이던 episode 저장과 데이터셋 마무리를 기다립니다(최대 2분)"):
+                pm.stop_job(STAGE, graceful=True, graceful_timeout_s=120)
             ds.invalidate_dataset_caches()
             st.success("세션을 종료했습니다.")
             st.rerun()
@@ -222,17 +264,55 @@ with st.container(border=True):
     _episodes_path = ds.DATASET_ROOT / "meta" / "episodes" / "chunk-000" / "file-000.parquet"
     # 새 컴퓨터에서 처음 실행하면 아직 녹화된 데이터셋이 없어 info.json을 읽다가
     # 페이지 전체가 오류로 멈췄다 -- 첫 녹화 전에는 안내만 보여 준다.
-    if not _info_path.is_file() or not _episodes_path.is_file():
+    _edit_job = pm.get_job_status(episode_manager.DELETE_STAGE)
+    # 삭제 job이 방금 끝났으면 캐시를 비우고 결과(로그 끝줄)를 알린다
+    if st.session_state.get("dc_edit_was_running") and not _edit_job["running"]:
+        ds.invalidate_dataset_caches()
+        _tail = pm.tail_log(st.session_state.get("dc_edit_log", ""), n_lines=20)
+        st.session_state["dc_edit_result"] = _tail
+    st.session_state["dc_edit_was_running"] = _edit_job["running"]
+    st.caption(f"저장 위치: `{ds.DATASET_ROOT}`")
+
+    if _edit_job["running"]:
+        st_autorefresh(interval=1500, key="dc_edit_autorefresh")
+        st.info(f"episode {_edit_job.get('episodes')} 삭제 중입니다… (데이터셋을 다시 쓰는 중이라 잠시 걸립니다)", icon="🗑")
+        st.code(pm.tail_log(_edit_job["log_path"], n_lines=15), language=None)
+    elif not ds.has_episodes():
         st.info("아직 저장된 episode가 없습니다. 위에서 녹화 세션을 시작해 첫 episode를 저장하면 여기에 현황이 표시됩니다.")
     else:
-        info = ds.get_dataset_info()
-        c1, c2, c3 = st.columns(3)
-        c1.metric("총 episode 수", info["total_episodes"])
+        if st.session_state.get("dc_edit_result"):
+            _res = st.session_state["dc_edit_result"]
+            _msg = "episode 삭제 결과:\n\n```\n" + "\n".join(_res.strip().splitlines()[-4:]) + "\n```"
+            if "완료:" in _res and "실패" not in _res:
+                st.success(_msg)
+            else:
+                st.error(_msg)
+            if st.button("확인", key="dc_edit_ack"):
+                st.session_state.pop("dc_edit_result", None)
+                st.rerun()
+        info = episode_manager._info(dataset_registry.DEFAULT_DATASET_ID) if not demo_mode.ENABLED else ds.get_dataset_info()
+        ep_table = episode_manager.episode_table()
+        # 녹화 세션 중에는 lerobot이 episode 메타·관절 데이터를 메모리에 모았다가 10개마다(또는 세션 종료 시)
+        # 파일에 쓴다. info.json의 개수는 바로 늘지만 목록 파일엔 아직 없는 episode가 생긴다(2026-11 확인).
+        _listed = set(ep_table["episode_index"].tolist())
+        _pending = [i for i in range(int(info["total_episodes"])) if i not in _listed]
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("총 episode 수", info["total_episodes"], f"목표 50까지 {max(0, 50 - info['total_episodes'])}개")
         c2.metric("총 frame 수", info["total_frames"])
-        c3.metric("fps", info["fps"])
+        c3.metric("평균 길이", f"{ep_table['seconds'].mean():.1f}초" if len(ep_table) else "-")
+        c4.metric("fps", info["fps"])
+        if _pending:
+            st.info(
+                f"episode {_pending[0]}~{_pending[-1]} ({len(_pending)}개)는 저장됐지만, lerobot이 녹화 세션 중에는 "
+                "목록·관절 데이터를 모아 두었다가 **10개마다 또는 세션이 끝날 때** 파일에 씁니다. 그래서 아래 표·그래프·손목 카메라에는 "
+                "아직 안 보이고, **MuJoCo 화면(3인칭) 영상은 바로 볼 수 있습니다**(둘러보기에서 선택).",
+                icon="⏳",
+            )
 
         st.markdown("**episode별 길이**")
-        ep_df = ds.get_episode_lengths_df()
+        # 캐시된 get_episode_lengths_df() 대신 매번 디스크에서 읽은 표를 쓴다 -- 녹화 중에 새로 저장된
+        # episode도 바로 목록·둘러보기에 나오게(세션이 끝나야 캐시가 비워지던 문제)
+        ep_df = ep_table[["episode_index", "length"]]
         chart = (
             alt.Chart(ep_df)
             .mark_bar(color=AQUA, size=18)
@@ -244,32 +324,97 @@ with st.container(border=True):
             .properties(height=320)
         )
         st.altair_chart(chart, width='stretch')
-        st.caption("길이가 유난히 짧거나 긴 episode는 오조작일 수 있으니 ② QA 검증에서 확인하세요.")
+        st.caption("길이가 유난히 짧거나 긴 episode는 오조작일 수 있으니 아래 목록과 둘러보기에서 확인하세요.")
+
+        # episode 목록 + 삭제 -----------------------------------------------------------
+        st.markdown("**episode 목록**")
+        _view = ep_table.rename(columns={"episode_index": "episode", "length": "frame 수", "seconds": "길이(초)", "check": "확인 필요"})
+        _sel = st.dataframe(
+            _view, hide_index=True, width="stretch", height=min(38 + 35 * len(_view), 320),
+            on_select="rerun", selection_mode="multi-row", key="dc_ep_table",
+        )
+        _picked = sorted(int(_view.iloc[i]["episode"]) for i in _sel.selection.rows)
+        st.caption("행을 클릭해 고르면 아래 둘러보기에 표시되고, 여러 개를 골라 지울 수 있습니다.")
+
+        if not demo_mode.ENABLED:
+            _busy = pm.check_conflict(episode_manager.DELETE_STAGE)
+            with st.popover(f"🗑 선택한 episode 삭제 ({len(_picked)}개)", disabled=not _picked):
+                st.markdown(f"삭제할 episode: **{_picked}**")
+                st.markdown(
+                    "- 삭제 전에 데이터셋 전체를 `data/_backups/`로 옮겨 **백업**합니다(되돌리려면 그 폴더를 원래 이름으로 복사).\n"
+                    "- lerobot 공식 기능(`delete_episodes`)으로 다시 쓰며, **남은 episode 번호가 0부터 다시 매겨집니다.** "
+                    "그래서 이전에 저장한 QA 스냅샷의 episode 목록과 맞지 않게 되니 삭제 후 ② QA에서 스냅샷을 다시 저장하세요."
+                )
+                if _busy:
+                    st.warning(f"'{_busy}'가 데이터셋을 사용 중이라 지금은 삭제할 수 없습니다.", icon="⚠️")
+                _ok = st.checkbox("위 내용을 확인했습니다", key="dc_del_confirm")
+                if st.button("삭제 실행", type="primary", disabled=not _ok or bool(_busy) or len(_picked) >= len(_view),
+                             key="dc_del_run"):
+                    try:
+                        _job = episode_manager.start_delete(_picked)
+                        st.session_state["dc_edit_log"] = _job["log_path"]
+                        st.session_state["dc_edit_was_running"] = True
+                        st.rerun()
+                    except pm.JobConflictError as e:
+                        st.error(str(e))
+                if len(_picked) >= len(_view):
+                    st.caption("모든 episode를 지울 수는 없습니다(lerobot 제약). 데이터셋을 새로 시작하려면 폴더를 직접 옮기세요.")
 
         st.markdown("**episode 둘러보기**")
-        _ep_ids = ep_df["episode_index"].tolist()
-        _ep = st.selectbox("episode", options=_ep_ids, key="dc_browse_episode")
-        _preview = ds.get_episode_preview_path(int(_ep))
+        _ep_ids = ep_df["episode_index"].tolist() + _pending
+        _default_ep = _picked[-1] if _picked else _ep_ids[-1]
+        _ep = st.selectbox(
+            "episode", options=_ep_ids, index=_ep_ids.index(_default_ep), key=f"dc_browse_episode_{_default_ep}",
+            format_func=lambda e: f"{e} (세션 종료 후 데이터 반영)" if e in _pending else str(e),
+        )
+        _is_pending = _ep in _pending
+        # 영상: 기본은 녹화 때 함께 저장한 3인칭 MuJoCo 화면, 없거나(기능 추가 전 녹화분) 원하면 손목 카메라
+        _scene = None if demo_mode.ENABLED else episode_manager.scene_clip_path(int(_ep))
+        _view_opts = (["MuJoCo 화면 (3인칭)"] if _scene else []) + ([] if _is_pending else ["손목 카메라 (학습 입력)"])
+        if not _view_opts:
+            st.info("이 episode는 아직 파일에 반영되지 않았고 3인칭 영상도 없습니다. 녹화 세션이 끝나면 표시됩니다.", icon="⏳")
+            _view_opts = ["손목 카메라 (학습 입력)"]
+        _view = st.radio("영상", _view_opts, horizontal=True, key="dc_browse_view")
+        if _is_pending:
+            st.caption("관절 그래프와 손목 카메라는 녹화 세션이 끝나면(또는 10개가 모이면) 표시됩니다.")
+        elif not _scene and not demo_mode.ENABLED:
+            st.caption("이 episode는 3인칭 화면 저장 기능을 넣기 전에 녹화돼 MuJoCo 화면 영상이 없습니다. "
+                       "이후 녹화분부터 저장됩니다.")
+        _preview, _preview_caption = None, ""
+        if _view.startswith("MuJoCo"):
+            _preview, _preview_caption = _scene, "MuJoCo 화면 (녹화 중 3인칭, 15fps — 학습에는 쓰지 않음)"
+        elif _is_pending:
+            _preview = None
+        else:
+            with st.spinner("손목 카메라 미리보기를 만드는 중…"):
+                try:
+                    _preview = (ds.get_episode_preview_path(int(_ep)) if demo_mode.ENABLED
+                                else episode_manager.preview_path(int(_ep)))
+                    _preview_caption = "손목 카메라 (학습 입력 이미지)"
+                except Exception as e:  # 미리보기 실패가 페이지 전체를 막지 않게
+                    _preview = None
+                    st.caption(f"미리보기를 만들지 못했습니다: {e}")
         _left, _right = st.columns([2, 3]) if _preview else (None, st.container())
         if _preview:
             with _left:
                 st.video(str(_preview), loop=True, autoplay=True, muted=True)
-                st.caption("손목 카메라 (학습 입력 이미지)")
+                st.caption(_preview_caption)
         with _right:
-            _jdf = ds.get_episode_joint_df(int(_ep))
-            _joint_chart = (
-                alt.Chart(_jdf)
-                .mark_line(strokeWidth=1.6)
-                .encode(
-                    x=alt.X("frame:Q", title="frame (30fps)"),
-                    y=alt.Y("state:Q", title="관절각 (rad)"),
-                    color=alt.Color("joint:N", legend=alt.Legend(title=None, orient="bottom")),
-                    tooltip=["frame", "joint", alt.Tooltip("state:Q", format=".3f")],
+            if not _is_pending:
+                _jdf = ds.get_episode_joint_df(int(_ep))
+                _joint_chart = (
+                    alt.Chart(_jdf)
+                    .mark_line(strokeWidth=1.6)
+                    .encode(
+                        x=alt.X("frame:Q", title="frame (30fps)"),
+                        y=alt.Y("state:Q", title="관절각 (rad)"),
+                        color=alt.Color("joint:N", legend=alt.Legend(title=None, orient="bottom")),
+                        tooltip=["frame", "joint", alt.Tooltip("state:Q", format=".3f")],
+                    )
+                    .properties(height=300)
                 )
-                .properties(height=300)
-            )
-            st.altair_chart(_joint_chart, width='stretch')
-            st.caption("6개 관절의 실제 위치(observation.state) — 매 episode 비슷한 궤적이면 시연이 일관된 것입니다.")
+                st.altair_chart(_joint_chart, width='stretch')
+                st.caption("6개 관절의 실제 위치(observation.state) — 매 episode 비슷한 궤적이면 시연이 일관된 것입니다.")
 
         if info["total_episodes"] > 0:
             st.page_link("pages/2_QA_검증.py", label="다음: ② QA 검증하기", icon="➡️")

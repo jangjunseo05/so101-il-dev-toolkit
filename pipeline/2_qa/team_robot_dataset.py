@@ -1103,8 +1103,9 @@ class TeamRobotDataset:
                 "status_label": "빈 자리",
                 "note": (
                     "이 파이프라인 어디에도 리사이즈 로직이 없습니다. 지금 문제가 안 되는 "
-                    "이유는 run_teleop_real.py/run_inference_mujoco.py 둘 다 캡처 해상도를 "
-                    "480x640으로 고정해뒀기 때문(pipeline/camera_config.py, 41절)입니다. "
+                    "이유는 녹화(run_teleop_real.py)와 추론(run_inference_mujoco.py)이 같은 "
+                    "캡처 해상도 상수(pipeline/camera_config.py의 WRIST_IMAGE_*, 현재 240x320 -- "
+                    "2026-11에 480x640에서 변경)를 함께 쓰기 때문(41절)입니다. "
                     "카메라를 바꾸거나 해상도가 달라지면 실제로 필요해질 수 있는 자리입니다 -- "
                     "다만 41절에서 두 스크립트에 방어 코드(렌더 직후 shape assert)를 추가해, "
                     "두 스크립트의 캡처 해상도가 서로 어긋나면 조용히 넘어가지 않고 즉시 "
