@@ -124,6 +124,8 @@ def main() -> None:
     ap.add_argument("--sweep-json", type=Path, default=None, help="run_val_loss_check.py 결과 JSON")
     ap.add_argument("--eval-report", type=Path, default=None)
     ap.add_argument("--eval-video", type=Path, default=None)
+    ap.add_argument("--eval-batch", type=Path, default=None,
+                    help="eval_batch.py 결과 폴더(reports/eval_runs/<시각>) -- 체크포인트별 성공률 비교표로 쓴다")
     ap.add_argument("--gpu", default=None, help='예: "GTX 1650 Ti (4GB)"')
     ap.add_argument("--train-time", default=None, help='예: "약 3시간 30분"')
     args = ap.parse_args()
@@ -160,9 +162,19 @@ def main() -> None:
         report = json.loads(args.eval_report.read_text(encoding="utf-8"))
         report["checkpoint"] = Path(report.get("checkpoint", "")).name or report.get("checkpoint")
         report["video"] = "inference_demo.mp4" if args.eval_video else None
-        (reports / args.eval_report.name).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        # build_static_demo.py가 reports/eval_*.json을 찾으므로 원래 이름이 eval_로 시작하지 않으면 붙인다.
+        name = args.eval_report.name if args.eval_report.name.startswith("eval_") else f"eval_{args.eval_report.name}"
+        (reports / name).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     if args.eval_video:
         shutil.copy2(args.eval_video, reports / "inference_demo.mp4")
+    if args.eval_batch:
+        # 로컬 경로는 빼고 비교에 필요한 값만 남긴다(공개 데모에 PC 경로가 드러나지 않게).
+        batch = json.loads((args.eval_batch / "batch.json").read_text(encoding="utf-8"))
+        slim = {k: batch.get(k) for k in ("episodes", "obj_jitter_cm", "seed", "max_seconds")}
+        slim["items"] = [{k: it.get(k) for k in ("label", "status", "successes", "success_rate", "failure_counts")}
+                         | {"step": int(Path(it["checkpoint"]).parent.name)}
+                         for it in batch["items"]]
+        (reports / "eval_batch.json").write_text(json.dumps(slim, ensure_ascii=False, indent=2), encoding="utf-8")
 
     summary = {
         "exported_at": time.strftime("%Y-%m-%d %H:%M"),

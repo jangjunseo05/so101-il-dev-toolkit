@@ -76,7 +76,7 @@
       <p><code>run_teleop_real.py</code>는 실물 리더암(<code>SO101Leader</code>)의 관절각을 50Hz로 읽어 MuJoCo 팔로워암에 전달하고, 30Hz로 손목 카메라 프레임과 관절값을 <code>LeRobotDataset</code>(v3.0)에 녹화합니다.</p>
       <table>
         <tr><th>함수</th><th>역할</th></tr>
-        <tr><td><code>load_or_create_dataset()</code></td><td>기존 데이터셋 로드 또는 신규 생성 (손상 감지 시 사용자 확인 후에만 백업)</td></tr>
+        <tr><td><code>load_or_create_dataset()</code></td><td>기존 데이터셋 로드 또는 신규 생성 (비어 있는 데이터셋은 자동 백업 후 새로 만들고, 손상 의심 시에는 사용자 확인 후에만 백업)</td></tr>
         <tr><td><code>leader_action_to_radians()</code></td><td>리더암 실측 캘리브레이션 범위 → 팔로워 제어 범위로 비례 스케일링 (1:1 매핑 시 clip 문제 해결)</td></tr>
         <tr><td><code>reset_pick_object()</code></td><td>episode 종료 시 물체를 추론과 같은 위치로 복귀 (<code>--randomize-object</code>면 무작위 위치)</td></tr>
         <tr><td>메인 루프</td><td>리더 액션 읽기 → MuJoCo <code>ctrl</code> 적용 → 물리 스텝 → 30Hz 카메라 캡처·녹화</td></tr>
@@ -140,7 +140,7 @@
     <p class="caption">학습된 ACT 체크포인트로 MuJoCo에서 자율 pick&amp;place 시도 (<code>run_inference_mujoco.py</code>, <code>eval_success_mujoco.py</code>)</p>
     <div class="card">
       <div class="card-head action">추론 세션 제어</div>
-      <div class="banner lock">🔒 추론 실행은 GPU와 MuJoCo 뷰어 창이 있는 컴퓨터에서만 할 수 있습니다. 실제 앱에는 빠른 헬스체크(NaN/Inf 확인)와 뷰어로 직접 관찰하는 두 가지 실행 방식이 있습니다.</div>
+      <div class="banner lock">🔒 추론 실행은 GPU와 MuJoCo 뷰어 창이 있는 컴퓨터에서만 할 수 있습니다. 실제 앱에는 빠른 헬스체크(NaN/Inf 확인), 뷰어로 직접 관찰(한 번 시도 후 로봇·물체 자동 리셋), 여러 체크포인트를 같은 조건으로 비교하는 자동 성공률 평가가 있습니다.</div>
     </div>
     <div class="card">
       <div class="card-head success">🎯 자동 성공률 평가</div>

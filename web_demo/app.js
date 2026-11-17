@@ -175,12 +175,25 @@ function renderInfer() {
   if (!e) return;
   const times = (e.results || []).filter((r) => r.success && r.time_to_place_s != null).map((r) => r.time_to_place_s);
   const avg = times.length ? `${(times.reduce((a, b) => a + b, 0) / times.length).toFixed(1)}초` : "-";
+  const b = m.eval_batch;
+  const jitter = e.obj_jitter_cm ?? (b && b.obj_jitter_cm);
   let html = `<p class="caption">학습된 정책이 MuJoCo에서 혼자 물체를 집어 접시에 놓는지 ${e.episodes}번 반복 실행했습니다. ` +
-    `물체가 접시 위에 ${e.hold_seconds}초 이상 머물면 성공, episode당 최대 ${e.max_seconds}초.</p>` +
-    `<div class="metrics">${metric("성공", `${e.successes} / ${e.episodes}`)}${metric("성공률", `${Math.round(e.success_rate * 100)}%`)}${metric("놓기까지 평균 시간", avg)}</div>`;
-  if (m.inference_video) html += `<video src="${m.inference_video}" controls muted playsinline></video><p class="caption">평가 실행 장면 (3인칭 MuJoCo 렌더, 편집 없음)</p>`;
-  html += `<details><summary>episode별 결과</summary><table><tr><th>episode</th><th>결과</th><th>놓기까지(초)</th><th>접시 중심까지 거리</th></tr>` +
-    (e.results || []).map((r) => `<tr><td>${r.episode}</td><td>${r.success ? "성공" : "실패"}</td><td>${r.time_to_place_s ?? "-"}</td><td>${(r.final_dist_to_plate_xy * 100).toFixed(1)}cm</td></tr>`).join("") +
+    `팔은 학습 데이터의 쉬는 자세에서 시작하고${jitter ? `, 물체 시작 위치는 매번 ±${jitter}cm 랜덤` : ""}입니다. ` +
+    `물체가 접시 위에 ${e.hold_seconds}초 이상 머물면 성공. 한 번 시도한 뒤 팔이 쉬는 자세로 돌아오면 episode를 끝냅니다` +
+    `(실패 후 재시도 성공은 세지 않음, 최대 ${e.max_seconds}초).</p>`;
+  if (b && b.items && b.items.length > 1) {
+    const fails = [...new Set(b.items.flatMap((it) => Object.keys(it.failure_counts || {})))];
+    html += `<b>체크포인트 비교 (같은 조건·같은 물체 위치 순서)</b><table><tr><th>체크포인트</th><th>성공</th><th>성공률</th>` +
+      fails.map((f) => `<th>${f}</th>`).join("") + `</tr>` +
+      b.items.slice().sort((x, y) => x.step - y.step).map((it) => `<tr><td>step ${it.step}</td><td>${it.successes} / ${b.episodes}</td>` +
+        `<td>${Math.round(it.success_rate * 100)}%</td>` + fails.map((f) => `<td>${(it.failure_counts || {})[f] || 0}</td>`).join("") + `</tr>`).join("") +
+      `</table><p class="caption">실패 유형은 물체 궤적만으로 분류했습니다(0.5cm 미만 이동=미접촉, 1cm 미만 들림=밀기만 함, 그 이상=들었지만 못 놓음). 아래 수치·영상은 가장 좋은 체크포인트(${e.label || ""}) 기준입니다.</p>`;
+  }
+  html += `<div class="metrics">${metric("성공", `${e.successes} / ${e.episodes}`)}${metric("성공률", `${Math.round(e.success_rate * 100)}%`)}${metric("놓기까지 평균 시간", avg)}</div>`;
+  if (m.inference_video) html += `<video src="${m.inference_video}" controls muted playsinline></video><p class="caption">평가 ${e.episodes} episode 전체를 이어 붙인 3인칭 MuJoCo 렌더 (편집·선별 없음, 성공과 실패가 그대로 섞여 있음). 정책 입력은 손목 카메라와 관절값뿐이며 이 3인칭 시점은 보여주기용입니다.</p>`;
+  html += `<details><summary>episode별 결과</summary><table><tr><th>episode</th><th>결과</th><th>놓기까지(초)</th><th>최대 들어올림</th><th>접시 중심까지 거리</th></tr>` +
+    (e.results || []).map((r) => `<tr><td>${r.episode + 1}</td><td>${r.success ? "성공" : `실패${r.failure_type ? ` (${r.failure_type})` : ""}`}</td><td>${r.time_to_place_s ?? "-"}</td>` +
+      `<td>${r.object_max_lift_cm != null ? r.object_max_lift_cm.toFixed(1) + "cm" : "-"}</td><td>${(r.final_dist_to_plate_xy * 100).toFixed(1)}cm</td></tr>`).join("") +
     `</table></details>`;
   $("#infer-body").innerHTML = html;
 }

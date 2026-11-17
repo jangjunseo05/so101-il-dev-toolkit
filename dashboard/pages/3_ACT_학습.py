@@ -40,14 +40,7 @@ st.set_page_config(page_title="③ ACT 학습", page_icon=get_logo_icon(), layou
 render_brand_header()
 
 # 데이터셋 선택 -- ②/④ 페이지와 st.session_state로 선택을 공유한다.
-_dataset_options = dataset_registry.dataset_options()
-st.session_state.setdefault("selected_dataset_id", dataset_registry.DEFAULT_DATASET_ID)
-_current_id = st.session_state["selected_dataset_id"]
-_ds_labels = list(_dataset_options.keys())
-_current_label = next(label for label, did in _dataset_options.items() if did == _current_id)
-_selected_label = st.selectbox("데이터셋", options=_ds_labels, index=_ds_labels.index(_current_label))
-dataset_id = _dataset_options[_selected_label]
-st.session_state["selected_dataset_id"] = dataset_id
+dataset_id = dataset_registry.pick_dataset()  # 하나뿐이면 선택 상자 없이 표시만
 profile = dataset_registry.get_profile(dataset_id)
 
 STAGE = "training"

@@ -119,7 +119,7 @@ def build(assets: Path, out: Path) -> None:
         with open(reports / "train_log.csv", encoding="utf-8") as f:
             train_log = [[int(r["step"]), float(r["loss"])] for r in csv.DictReader(f)]
 
-    evals = sorted(reports.glob("eval_*.json"))
+    evals = sorted(p for p in reports.glob("eval_*.json") if p.name != "eval_batch.json")
     eval_report = _read_json(evals[-1]) if evals else None
     has_video = (reports / "inference_demo.mp4").is_file()
     if has_video:
@@ -147,6 +147,7 @@ def build(assets: Path, out: Path) -> None:
         "train_log": train_log,
         "sweep": _read_json(reports / "checkpoint_sweep_results.json"),
         "eval": eval_report,
+        "eval_batch": _read_json(reports / "eval_batch.json"),
         "inference_video": "media/inference_demo.mp4" if has_video else None,
         "previews": previews,
         "has_wrist_roll_case": (media / "wrist_roll_clip_diagnosis.png").is_file(),
