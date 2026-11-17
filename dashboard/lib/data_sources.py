@@ -33,6 +33,19 @@ CHECKPOINTS_DIR = _BLOCK["checkpoints_dir"]
 REPORTS_DIR = _BLOCK["reports_dir"]
 
 
+def has_episodes(dataset_id: str = dataset_registry.DEFAULT_DATASET_ID) -> bool:
+    """저장된 episode가 1개 이상 있는 데이터셋인지. info.json만 보면 안 된다 -- 녹화 세션을 열었다가
+    아무것도 저장하지 않고 닫으면 total_episodes=0인 info.json만 남는데, 이 상태로
+    LeRobotDataset을 열면 로컬 메타를 못 읽고 Hugging Face Hub로 가서 401/404로 멈춘다(2026-11 확인)."""
+    root = dataset_registry.get_profile(dataset_id)["dataset_root"]
+    try:
+        with open(root / "meta" / "info.json", encoding="utf-8") as f:
+            total = int(json.load(f).get("total_episodes", 0))
+    except (OSError, ValueError):
+        return False
+    return total > 0 and any((root / "meta" / "episodes").glob("chunk-*/file-*.parquet"))
+
+
 @st.cache_data
 def get_dataset_info(dataset_id: str = dataset_registry.DEFAULT_DATASET_ID) -> dict:
     profile = dataset_registry.get_profile(dataset_id)
@@ -43,8 +56,11 @@ def get_dataset_info(dataset_id: str = dataset_registry.DEFAULT_DATASET_ID) -> d
 @st.cache_data
 def get_episode_lengths_df(dataset_id: str = dataset_registry.DEFAULT_DATASET_ID) -> pd.DataFrame:
     profile = dataset_registry.get_profile(dataset_id)
-    df = pd.read_parquet(profile["dataset_root"] / "meta" / "episodes" / "chunk-000" / "file-000.parquet")
-    return df[["episode_index", "length"]].sort_values("episode_index").reset_index(drop=True)
+    # lerobot v3는 episode 메타가 커지면 file-000, file-001...로 나눠 쓴다. 예전엔 file-000만 읽어서
+    # 25개 중 0~22번만 보였다(2026-11 확인) -- 모든 파일을 읽는다.
+    files = sorted((profile["dataset_root"] / "meta" / "episodes").glob("chunk-*/file-*.parquet"))
+    df = pd.concat([pd.read_parquet(f, columns=["episode_index", "length"]) for f in files], ignore_index=True)
+    return df.sort_values("episode_index").reset_index(drop=True)
 
 
 @st.cache_resource
@@ -228,6 +244,21 @@ def get_latest_eval_report(dataset_id: str = dataset_registry.DEFAULT_DATASET_ID
         report = json.load(f)
     report["_file"] = candidates[-1].name
     return report
+
+
+def list_eval_batches(dataset_id: str = dataset_registry.DEFAULT_DATASET_ID) -> list[dict]:
+    """eval_batch.py가 남긴 reports/eval_runs/<시각>/batch.json 목록(최신 먼저).
+    진행 중에도 갱신되는 파일이라 캐시하지 않는다."""
+    root = dataset_registry.get_profile(dataset_id)["reports_dir"] / "eval_runs"
+    out = []
+    for path in sorted(root.glob("*/batch.json"), reverse=True) if root.is_dir() else []:
+        try:
+            batch = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        batch["_dir"] = path.parent
+        out.append(batch)
+    return out
 
 
 @st.cache_data

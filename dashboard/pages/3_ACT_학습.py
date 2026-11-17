@@ -266,6 +266,7 @@ else:
                         tr.delete_run(_run_id)
                         st.error(str(e))
                     else:
+                        tr.add_log_path(_run_id, _started["log_path"])
                         st.session_state.pop(_crash_key, None)
                         st.session_state.pop(_finalize_msg_key, None)
                         st.session_state[_run_id_key] = _run_id
@@ -322,6 +323,7 @@ else:
                                 tr.finalize_run(_run_id, "")
                                 st.error(str(e))
                             else:
+                                tr.add_log_path(_run_id, _started["log_path"])
                                 st.session_state.pop(_crash_key, None)
                                 st.session_state.pop(_finalize_msg_key, None)
                                 st.session_state[_run_id_key] = _run_id
@@ -337,7 +339,56 @@ else:
 with st.container(border=True):
     render_card_header("📈", "학습 결과", "success")
 
+    # run별 학습 기록 -- state/training_runs/*.json + 각 run의 output_dir/로그를 직접 읽는다
+    # (브라우저 세션이 끊겨도 남음). 아래 스윕/정적 리포트는 reports/ 기준이라 별개.
+    _runs = [r for r in tr.list_runs() if tr._matches_dataset(r, dataset_id)] if not demo_mode.ENABLED else []
+    if _runs:
+        st.markdown("**학습 기록 (run별)**")
+        for _r in _runs:
+            # 페이지가 학습 종료 순간을 못 본 경우(브라우저를 닫아 둠 등) 여기서 확정한다.
+            if _r.get("status") == "running" and not job_status["running"]:
+                _logs = tr.find_run_logs(_r)
+                _text = _logs[-1].read_text(encoding="utf-8", errors="replace")[-20000:] if _logs else ""
+                tr.update_last_checkpoint_step(_r["run_id"], _text)
+                tr.finalize_run(_r["run_id"], _text)
+                _r.update(tr.get_run(_r["run_id"]) or {})
+        _status_ko = {"completed": "✅ 완료", "interrupted": "⏸️ 중단", "running": "🧠 학습 중"}
+        _run_labels = {
+            f"{r['run_id']} — {_status_ko.get(r.get('status'), r.get('status'))}": r for r in _runs
+        }
+        _sel = _run_labels[st.selectbox("run 선택", options=list(_run_labels.keys()), key="training_history_select")]
+        _t0, _t1 = _sel.get("started_at"), _sel.get("ended_at")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("상태", _status_ko.get(_sel.get("status"), str(_sel.get("status"))))
+        c2.metric("시작", time.strftime("%m-%d %H:%M", time.localtime(_t0)) if _t0 else "-")
+        c3.metric("종료", time.strftime("%m-%d %H:%M", time.localtime(_t1)) if _t1 else "-")
+        c4.metric("소요", f"{int((_t1 - _t0) // 3600)}시간 {int((_t1 - _t0) % 3600 // 60)}분" if _t0 and _t1 else "-")
+        _pts = tr.parse_train_loss(tr.find_run_logs(_sel))
+        if _pts:
+            _ldf = pd.DataFrame(_pts, columns=["step", "loss"])
+            st.altair_chart(
+                alt.Chart(_ldf).mark_line(strokeWidth=2, color=TRAIN_COLOR).encode(
+                    x=alt.X("step:Q", title="training step"),
+                    y=alt.Y("loss:Q", title="train loss", scale=alt.Scale(type="log")),
+                    tooltip=["step", alt.Tooltip("loss:Q", format=".4f")],
+                ).properties(height=260, title=f"train loss (로그 기준, 마지막 {_pts[-1][1]:.3f} @ step {_pts[-1][0]})"),
+                width='stretch',
+            )
+        else:
+            st.caption("이 run의 로그에서 loss를 찾지 못했습니다.")
+        _ckpts = tr.list_checkpoints(_sel["output_dir"])
+        if _ckpts:
+            _cdf = pd.DataFrame(_ckpts)
+            _cdf["saved_at"] = _cdf["saved_at"].map(lambda t: time.strftime("%m-%d %H:%M", time.localtime(t)))
+            st.dataframe(_cdf.rename(columns={"saved_at": "저장 시각"}), width='stretch', hide_index=True)
+        else:
+            st.caption(f"체크포인트가 없습니다 ({_sel['output_dir']}\\checkpoints).")
+        st.divider()
+
     sweep_df = ds.get_checkpoint_sweep_df(dataset_id=dataset_id)
+    if sweep_df is not None:
+        st.caption("⚠️ 아래 스윕 차트와 '저장된 체크포인트' 표는 `reports/`·`checkpoints/`에 미리 들어 있던 "
+                   "이전 학습 결과이며, 위 run별 기록과는 별개입니다.")
     if sweep_df is None:
         st.info(
             f"'{profile['label']}' 데이터셋은 아직 체크포인트 스윕(step별 val loss 재현 측정) 리포트가 없습니다 — "

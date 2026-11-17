@@ -29,9 +29,14 @@ JOB_LOGS_DIR.mkdir(parents=True, exist_ok=True)
 # stage가 독점적으로 필요로 하는 자원 태그. ③④(학습/추론) 웹 트리거를 붙일 때
 # 이 표만 채우면 process_manager 자체는 그대로 재사용 가능(CLAUDE.md 29-2절).
 STAGE_RESOURCES: dict[str, list[str]] = {
-    "data_collection": ["mujoco_viewer", "serial_port"],
-    "training": ["gpu"],
+    # "dataset": 데이터셋 폴더를 쓰거나 읽는 중 -- episode 삭제(dataset_edit)가 폴더를 통째로
+    # 옮기므로, 녹화·학습 중에는 삭제를 막고 삭제 중에는 녹화·학습을 막는다.
+    "data_collection": ["mujoco_viewer", "serial_port", "dataset"],
+    "calibration": ["serial_port"],  # 리더암 캘리브레이션(calibrate_leader_web.py)
+    "dataset_edit": ["dataset"],  # episode 삭제(pipeline/2_qa/delete_episodes.py)
+    "training": ["gpu", "dataset"],
     "inference": ["gpu", "mujoco_viewer"],
+    "evaluation": ["gpu"],  # 자동 성공률 평가(pipeline/4_inference/eval_batch.py, 뷰어 없음)
 }
 
 # start_job()이 lock 파일을 원자적으로 생성한 직후, 아직 실제 subprocess pid로
@@ -179,6 +184,10 @@ def start_job(stage: str, cmd: list[str], extra_meta: dict | None = None) -> dic
 
         proc = subprocess.Popen(
             cmd,
+            # 대시보드가 띄운 프로세스는 사람이 콘솔에 입력할 수 없다. stdin을 물려주면 input()에서
+            # 끝없이 멈춘다(2026-11: 빈 데이터셋 y/N 확인에서 MuJoCo가 '안 켜지는' 것처럼 보였음).
+            # DEVNULL이면 input()이 즉시 EOFError -> 각 스크립트의 취소 경로로 끝나고 로그에 남는다.
+            stdin=subprocess.DEVNULL,
             stdout=log_file,
             stderr=subprocess.STDOUT,
             cwd=str(PROJECT_ROOT),
@@ -311,6 +320,7 @@ _CRASH_PATTERNS = (
     "filenotfounderror",
     "permissionerror",
     "connectionerror",
+    "사용자 확인 없음",  # run_teleop_real.py가 확인이 필요한 데이터셋 상태에서 취소하고 끝난 경우
 )
 
 

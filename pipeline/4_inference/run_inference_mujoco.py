@@ -266,6 +266,100 @@ class EpisodeResetControl:
         self.reset_requested = False
 
 
+def object_on_plate(model, data) -> bool:
+    """물체가 접시 위에 놓여 있는지 -- eval_success_mujoco.py의 _object_on_plate()와 같은 기준
+    (물체 중심이 접시 반경 안쪽, 접시 윗면 근처 높이)."""
+    obj = data.xpos[model.body("pick_object").id]
+    plate = data.xpos[model.body("place_plate").id]
+    radius = float(model.geom("place_plate_geom").size[0])
+    plate_top_z = float(plate[2] + model.geom("place_plate_geom").size[1])
+    half = float(model.geom("pick_object_geom").size[0])
+    within = float(np.linalg.norm(obj[:2] - plate[:2])) <= radius - half * 0.5
+    return bool(within and obj[2] <= plate_top_z + half * 2.5)
+
+
+# 학습 데이터 50 episode의 첫 프레임·마지막 프레임 observation.state 중앙값(2026-11-17 실측,
+# 관절별 편차 std ≤ 0.05rad) -- 사람이 리더암을 내려놓은 "쉬는 자세". 모든 시연이 이 자세에서
+# 시작해 이 자세로 끝난다. 시뮬레이션 기본 자세(관절 전부 0, 팔을 편 상태)는 학습 때 한 번도
+# 본 적 없는 자세라, 추론·평가도 이 자세에서 시작하고 이 자세로의 복귀를 '한 번의 시도 끝'으로 본다.
+REST_QPOS = np.array([0.01, 0.0, 1.58, -1.32, 0.05, -0.17])
+
+
+def reset_to_rest(model, data, follower_qpos_adr, follower_actuator_id) -> None:
+    """로봇+물체를 초기 상태로: scene.xml 기본값(물체 위치)으로 리셋한 뒤 팔만 쉬는 자세로 둔다
+    (첫 policy 호출 전에 팔이 0 자세로 끌려가지 않도록 액추에이터 목표값도 같이 맞춘다)."""
+    mujoco.mj_resetData(model, data)
+    lo = model.actuator_ctrlrange[follower_actuator_id, 0]
+    hi = model.actuator_ctrlrange[follower_actuator_id, 1]
+    rest = np.clip(REST_QPOS, lo, hi)
+    for adr, act, v in zip(follower_qpos_adr, follower_actuator_id, rest):
+        data.qpos[adr] = v
+        data.ctrl[act] = v
+    mujoco.mj_forward(model, data)
+
+
+class AutoEpisode:
+    """episode 경계 자동 판정 -- 데이터 수집에서 시연 1번 후 S로 끊고 물체를 제자리로 돌리는 것과 같은 흐름.
+
+    한 번의 시도 = 팔이 쉬는 자세에서 leave_tol rad 이상 벗어났다가 home_tol rad 안으로 돌아와
+    settle_s초 머무름. 그 시점에 episode를 끝낸다(성공이든 실패든) -- 실패 후 같은 물체에
+    재시도하는 것을 성공으로 세지 않기 위함. 물체가 접시 위에 hold_s초 이상 머문 적이 있으면 성공.
+    팔이 돌아오지 않으면 episode_s초에서 끊는다.
+    step() 반환: None(계속) / "success" / "fail_returned" / "timeout".
+    """
+
+    def __init__(self, episode_s: float, hold_s: float = 1.0, leave_tol: float = 0.5,
+                 home_tol: float = 0.2, settle_s: float = 1.0, verbose: bool = True):
+        self.episode_s, self.hold_s = episode_s, hold_s
+        self.leave_tol, self.home_tol, self.settle_s = leave_tol, home_tol, settle_s
+        self.verbose = verbose
+        self.episode = 1
+        self.successes = 0
+        self.start()
+
+    def start(self):
+        self.t = 0.0
+        self.on_plate_since = None
+        self.success_at = None  # 접시 위에 놓인 시각(성공 판정된 경우)
+        self.left_home = False
+        self.home_since = None
+
+    def _log(self, msg):
+        if self.verbose:
+            print(f"[run_inference_mujoco] episode {self.episode}: {msg}", flush=True)
+
+    def step(self, dt: float, on_plate: bool, arm_qpos) -> str | None:
+        self.t += dt
+        if self.success_at is None:
+            if on_plate:
+                self.on_plate_since = self.t if self.on_plate_since is None else self.on_plate_since
+                if self.t - self.on_plate_since >= self.hold_s:
+                    self.success_at = self.on_plate_since
+                    self.successes += 1
+                    self._log(f"성공 ({self.on_plate_since:.1f}초에 접시 위)")
+            else:
+                self.on_plate_since = None
+        dev = float(np.max(np.abs(np.asarray(arm_qpos)[:5] - REST_QPOS[:5])))
+        if dev > self.leave_tol:
+            self.left_home = True
+            self.home_since = None
+        elif self.left_home and dev < self.home_tol:
+            self.home_since = self.t if self.home_since is None else self.home_since
+            if self.t - self.home_since >= self.settle_s:
+                if self.success_at is None:
+                    self._log(f"쉬는 자세로 복귀({self.t:.1f}초) -- 접시에 못 놓음, 실패")
+                    return "fail_returned"
+                return "success"
+        else:
+            self.home_since = None
+        if self.t >= self.episode_s:
+            if self.success_at is None:
+                self._log(f"시간 초과({self.episode_s:g}초) -- 실패")
+                return "timeout"
+            return "success"
+        return None
+
+
 def build_observation(
     qpos_state: np.ndarray, wrist_image_hwc_uint8: np.ndarray, task: str
 ) -> dict:
@@ -312,6 +406,10 @@ def main():
         default=5.0,
         help="--headless일 때 시뮬레이션할 시간(초). 뷰어 모드에서는 사용하지 않음",
     )
+    parser.add_argument("--episode-seconds", type=float, default=30.0,
+                        help="뷰어 모드: 성공 없이 이 시간이 지나면 로봇+물체를 자동 리셋(eval의 max-seconds와 같은 기본값)")
+    parser.add_argument("--no-auto-reset", action="store_true",
+                        help="뷰어 모드: 자동 리셋을 끄고 R 키로만 리셋")
     args = parser.parse_args()
 
     print(f"[run_inference_mujoco] 체크포인트 로딩: {args.checkpoint}")
@@ -336,8 +434,7 @@ def main():
     ctrl_lo = model.actuator_ctrlrange[follower_actuator_id, 0]
     ctrl_hi = model.actuator_ctrlrange[follower_actuator_id, 1]
 
-    mujoco.mj_resetData(model, data)
-    mujoco.mj_forward(model, data)
+    reset_to_rest(model, data, follower_qpos_adr, follower_actuator_id)
 
     substeps = max(1, round(1.0 / args.hz / model.opt.timestep))
     renderer = mujoco.Renderer(model, height=IMAGE_HEIGHT, width=IMAGE_WIDTH)
@@ -405,6 +502,9 @@ def main():
     print(f"체크포인트: {args.checkpoint}")
     print(f"물리 스텝: {args.hz} Hz   policy 호출: {args.policy_hz} Hz")
     print("R 키: episode 리셋(로봇+물체를 초기 위치로, policy 액션 큐도 초기화)")
+    if not args.no_auto_reset:
+        print("자동 리셋: 한 번 시도한 뒤 팔이 쉬는 자세로 돌아오면(성공·실패 무관) 로봇+물체를 초기 위치로, "
+              f"{args.episode_seconds:g}초 안에 안 돌아오면 그때 리셋")
     print("=" * 60)
 
     loop_dt = 1.0 / args.hz
@@ -412,6 +512,20 @@ def main():
     frame_accum = 0.0
     scene_frame_accum = 0.0
     scene_frame_interval = 1.0 / SCENE_STREAM_FPS
+    auto = None if args.no_auto_reset else AutoEpisode(episode_s=args.episode_seconds)
+    overlay_accum = 0.0
+
+    def do_reset(reason: str) -> None:
+        nonlocal frame_accum
+        reset_to_rest(model, data, follower_qpos_adr, follower_actuator_id)
+        policy.reset()
+        frame_accum = 0.0
+        if auto is not None:
+            auto.episode += 1
+            auto.start()
+        print(f"[run_inference_mujoco] episode 리셋 ({reason}) -- 로봇(쉬는 자세)+물체 초기 위치", flush=True)
+
+    _reason_ko = {"success": "성공 후 복귀", "fail_returned": "실패 후 복귀", "timeout": "시간 초과"}
 
     try:
         with mujoco.viewer.launch_passive(model, data, key_callback=key_callback) as viewer:
@@ -420,11 +534,26 @@ def main():
 
                 if control.reset_requested:
                     control.reset_requested = False
-                    mujoco.mj_resetData(model, data)
-                    mujoco.mj_forward(model, data)
-                    policy.reset()
-                    frame_accum = 0.0
-                    print("[run_inference_mujoco] episode 리셋 (R)")
+                    if auto is not None and auto.success_at is None:
+                        print(f"[run_inference_mujoco] episode {auto.episode}: R 키로 중단(성공 전)", flush=True)
+                    do_reset("R")
+
+                if auto is not None:
+                    reason = auto.step(loop_dt, object_on_plate(model, data), data.qpos[follower_qpos_adr])
+                    if reason is not None:
+                        do_reset("자동: " + _reason_ko[reason])
+                    overlay_accum += loop_dt
+                    if overlay_accum >= 0.2:
+                        overlay_accum = 0.0
+                        state = ("SUCCESS - returning" if auto.success_at is not None
+                                 else "attempting" if auto.left_home else "starting")
+                        try:
+                            viewer.set_texts((mujoco.mjtFont.mjFONT_BIG, mujoco.mjtGridPos.mjGRID_TOPLEFT,
+                                              f"episode {auto.episode}  {auto.t:4.1f}s / {auto.episode_s:g}s\n"
+                                              f"{state}\nsuccess {auto.successes}/{auto.episode - (0 if auto.success_at else 1)}",
+                                              "auto reset on  |  R: reset now"))
+                        except Exception:
+                            pass  # 표시 실패는 추론에 영향 없음
 
                 try:
                     frame_accum += loop_dt

@@ -47,11 +47,11 @@ pipeline/
 
 위 네 단계를 감싸는 Streamlit 앱(`streamlit run dashboard/app.py`)으로, 팀원이 터미널 없이 전체 루프를 실행할 수 있습니다.
 
-1. **데이터 수집** — `run_teleop_real.py`를 subprocess로 시작/중지하며, 로컬 COM 포트 설정 폼을 제공합니다.
-2. **QA 검증** — `TeamRobotDataset`을 직접 import해(subprocess 없이 순수 계산) 이상치/무결성 검사를 실행합니다.
+0. **홈** — 맨 위 헬스 요약(episode 수·QA·학습 loss·성공률)과, 처음 쓰는 사람이 리더암 연결 → 포트 찾기·입력 → 모터 응답 시험 → 캘리브레이션 → 녹화 → QA → 학습 → 추론 평가를 순서대로 따라가는 단계별 가이드입니다. 단계별 완료 여부는 실제 상태(설정·캘리브레이션 파일·episode 수·QA 스냅샷·학습 run·평가 리포트)에서 읽습니다.
+1. **데이터 수집** — `run_teleop_real.py`를 subprocess로 시작/중지하며, 로컬 COM 포트 설정 폼과 웹 버튼으로 진행하는 리더암 캘리브레이션(`calibrate_leader_web.py`)을 제공합니다.
+2. **QA 검증** — `TeamRobotDataset`을 직접 import해(subprocess 없이 순수 계산) 이상치/무결성 검사를 실행합니다. 하단 "(자세히 보기) 전처리 구조"에서 `describe_preprocessing()` 결과(일반적인 IL 전처리 단계가 QA 레이어·ACT policy·`lerobot-train` CLI 중 어디서 처리되는지)를 보여줍니다.
 3. **ACT 학습** — 신규 또는 이어서(resume) `lerobot-train` 실행을 subprocess로 시작합니다. GPU 리소스 lock으로 추론과 동시에 실행되지 않습니다.
 4. **추론** — `run_inference_mujoco.py`를 동기식 headless 헬스 체크 또는 subprocess 기반 인터랙티브 뷰어 세션으로 실행합니다.
-5. **전처리 구조** — `TeamRobotDataset.describe_preprocessing()`의 읽기 전용 뷰입니다. 일반적인 IL 전처리 단계(resize, augmentation, action chunking, frame stacking 등)가 QA 레이어, ACT policy, `lerobot-train` CLI 중 실제로 어디서 처리되는지(또는 처리되지 않는지) 보여줍니다.
 
 단계 간 리소스 충돌(시리얼 포트 / GPU / MuJoCo 뷰어)은 `dashboard/lib/process_manager.py`의 lock 시스템으로 직렬화됩니다. 대시보드는 파이프라인 모듈을 읽기 전용으로만 import하며 수정하지 않습니다.
 
