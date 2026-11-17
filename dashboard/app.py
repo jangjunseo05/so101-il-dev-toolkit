@@ -19,7 +19,9 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lib import data_sources as ds
+from lib import demo_mode
 from lib import start_guide
+from lib import training_run as tr
 from lib.theme import STAGE_NAMES, STAGE_PAGES
 from lib.ui_components import get_logo_icon, render_brand_header, render_splash_screen
 
@@ -91,6 +93,17 @@ def _render_health_summary() -> None:
     train_log = ds.get_train_log_df()
     eval_report = ds.get_latest_eval_report()
 
+    # 로컬에서는 웹에서 실제로 돌린 최신 학습 run·평가 묶음을 우선 보여 준다. reports/의 스윕·평가
+    # JSON은 예전 run의 결과일 수 있어(공개 데모용 export에서 쓰는 파일) 그대로 두면 지금 결과와 다르다.
+    latest_run, run_loss, latest_batch = None, [], None
+    if not demo_mode.ENABLED:
+        runs = tr.list_completed_runs()
+        if runs:
+            latest_run = runs[0]
+            run_loss = tr.parse_train_loss(tr.find_run_logs(latest_run))
+        batches = [b for b in ds.list_eval_batches() if b.get("ended_at")]
+        latest_batch = batches[0] if batches else None
+
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         st.metric("① 데이터 수집", f"{info['total_episodes']} episodes", f"{info['total_frames']} frames")
@@ -99,7 +112,16 @@ def _render_health_summary() -> None:
         excluded_frames = qa["clean"]["excluded_count"]
         st.metric("② QA & 검증", f"{qa['num_episodes']} episodes 스캔", f"이상 프레임 {excluded_frames}건 탐지")
     with c3:
-        if sweep_df is not None:
+        if latest_run is not None and run_loss:
+            step, loss = run_loss[-1]
+            st.metric("③ ACT 학습", f"train loss {loss:.3f}", f"step {step}")
+            _bits = [latest_run["run_id"]]
+            if latest_run.get("started_at") and latest_run.get("ended_at"):
+                _min = int((latest_run["ended_at"] - latest_run["started_at"]) // 60)
+                _bits.append(f"{_min // 60}시간 {_min % 60}분" if _min >= 60 else f"{_min}분")
+            st.caption(" · ".join(_bits))
+            summary = {}  # 아래 export 요약(예전 run일 수 있음)은 생략
+        elif sweep_df is not None:
             final_row = sweep_df.iloc[-1]
             st.metric("③ ACT 학습", f"final train loss {final_row['train_loss']:.3f}", f"val {final_row['val_loss']:.3f}")
         elif train_log is not None:
@@ -110,7 +132,17 @@ def _render_health_summary() -> None:
         if _train_bits:
             st.caption(" · ".join(_train_bits))
     with c4:
-        if eval_report:
+        _done = [it for it in (latest_batch or {}).get("items", []) if it.get("status") == "done"]
+        if _done:
+            def _step(it):
+                return int(Path(it["checkpoint"]).parent.name) if Path(it["checkpoint"]).parent.name.isdigit() else 0
+            _done.sort(key=_step, reverse=True)
+            top = _done[0]
+            st.metric("④ 추론 성공률", f"{top['successes']} / {latest_batch['episodes']}",
+                      f"{top['success_rate'] * 100:.0f}% · step {_step(top)}")
+            st.caption(" · ".join(f"step {_step(it)}: {it['successes']}/{latest_batch['episodes']}" for it in _done)
+                       + f" · 물체 ±{latest_batch.get('obj_jitter_cm', 0):g}cm")
+        elif eval_report:
             st.metric("④ 추론 성공률", f"{eval_report['successes']} / {eval_report['episodes']}",
                       f"{eval_report['success_rate'] * 100:.0f}% (MuJoCo 자동 평가)")
         else:
