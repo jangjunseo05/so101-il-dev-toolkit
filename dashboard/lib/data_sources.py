@@ -237,7 +237,7 @@ def get_latest_eval_report(dataset_id: str = dataset_registry.DEFAULT_DATASET_ID
     reports_dir = dataset_registry.get_profile(dataset_id)["reports_dir"]
     if not reports_dir.is_dir():
         return None
-    candidates = sorted(reports_dir.glob("eval_*.json"))
+    candidates = sorted(p for p in reports_dir.glob("eval_*.json") if p.name != "eval_batch.json")
     if not candidates:
         return None
     with open(candidates[-1], encoding="utf-8") as f:

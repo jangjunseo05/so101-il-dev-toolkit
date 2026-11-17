@@ -38,15 +38,8 @@ render_brand_header()
 st.title("② QA & 검증")
 st.caption("`TeamRobotDataset` 커스텀 통계 · 아웃라이어 탐지 · 무결성 검증 (`team_robot_dataset.py`)")
 
-# 데이터셋 선택 -- 다른 페이지(③④)와 st.session_state로 선택을 공유한다.
-_dataset_options = dataset_registry.dataset_options()
-st.session_state.setdefault("selected_dataset_id", dataset_registry.DEFAULT_DATASET_ID)
-_current_id = st.session_state["selected_dataset_id"]
-_labels = list(_dataset_options.keys())
-_current_label = next(label for label, did in _dataset_options.items() if did == _current_id)
-_selected_label = st.selectbox("데이터셋", options=_labels, index=_labels.index(_current_label))
-dataset_id = _dataset_options[_selected_label]
-st.session_state["selected_dataset_id"] = dataset_id
+# 데이터셋 선택 -- 다른 페이지(③④)와 st.session_state로 선택을 공유한다(하나뿐이면 표시만).
+dataset_id = dataset_registry.pick_dataset()
 profile = dataset_registry.get_profile(dataset_id)
 
 # 선택한 데이터셋이 아직 로컬에 없으면(새 컴퓨터 첫 실행 등) TeamRobotDataset이

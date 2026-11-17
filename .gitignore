@@ -49,6 +49,8 @@ Thumbs.db
 
 # Hugging Face Space build output (tools/build_hf_space.py)
 build/
+# 공개 데모용 결과물(tools/export_demo_assets.py가 실제 데이터·영상에서 생성) -- 데이터는 git에 넣지 않는다
+demo_assets/
 
 # Netlify CLI 로컬 연결 정보
 .netlify/

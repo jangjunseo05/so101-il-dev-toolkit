@@ -55,14 +55,7 @@ render_brand_header()
 # 데이터셋 선택 -- ②/③ 페이지와 st.session_state로 선택을 공유한다. 데이터셋마다
 # 추론 스크립트/씬(worldbody)/카메라 구성이 완전히 다르므로(1카메라 640x480 vs
 # 2카메라 320x240) 체크포인트뿐 아니라 실행할 스크립트 자체가 바뀐다.
-_dataset_options = dataset_registry.dataset_options()
-st.session_state.setdefault("selected_dataset_id", dataset_registry.DEFAULT_DATASET_ID)
-_current_id = st.session_state["selected_dataset_id"]
-_ds_labels = list(_dataset_options.keys())
-_current_label = next(label for label, did in _dataset_options.items() if did == _current_id)
-_selected_label = st.selectbox("데이터셋", options=_ds_labels, index=_ds_labels.index(_current_label))
-dataset_id = _dataset_options[_selected_label]
-st.session_state["selected_dataset_id"] = dataset_id
+dataset_id = dataset_registry.pick_dataset()  # 하나뿐이면 선택 상자 없이 표시만
 profile = dataset_registry.get_profile(dataset_id)
 
 if dataset_id == "bottle_pick_pour":

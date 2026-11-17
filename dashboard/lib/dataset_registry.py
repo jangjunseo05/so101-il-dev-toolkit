@@ -99,5 +99,36 @@ def get_profile(dataset_id: str) -> dict:
 
 
 def dataset_options() -> dict[str, str]:
-    """{label: dataset_id} -- selectbox용."""
-    return {profile["label"]: key for key, profile in DATASETS.items()}
+    """{label: dataset_id} -- 이 컴퓨터에 데이터 폴더나 체크포인트가 실제로 있는 데이터셋만.
+    ① 데이터 수집은 항상 block_pickplace(data/so101_teleop_real)에 쌓으므로 기본값은 늘 포함한다.
+    병 데이터셋은 다른 프로젝트에서 옮겨 오는 것이라 폴더가 없으면 고를 이유가 없다."""
+    return {
+        profile["label"]: key for key, profile in DATASETS.items()
+        if key == DEFAULT_DATASET_ID or profile["dataset_root"].exists() or profile["default_checkpoint"].exists()
+    }
+
+
+def pick_dataset() -> str:
+    """②③④ 페이지 상단의 데이터셋 선택. 고를 데이터셋이 하나뿐이면 선택 상자 대신
+    지금 어떤 데이터를 쓰는지만 표시한다. 선택은 st.session_state로 페이지 간 공유."""
+    import streamlit as st
+
+    options = dataset_options()
+    ids = list(options.values())
+    st.session_state.setdefault("selected_dataset_id", DEFAULT_DATASET_ID)
+    if st.session_state["selected_dataset_id"] not in ids:
+        st.session_state["selected_dataset_id"] = DEFAULT_DATASET_ID
+    if len(ids) == 1:
+        dataset_id = ids[0]
+        p = DATASETS[dataset_id]
+        try:
+            root = p["dataset_root"].relative_to(PROJECT_ROOT).as_posix()
+        except ValueError:
+            root = str(p["dataset_root"])
+        st.caption(f"데이터셋: **{p['label']}** (`{root}` — ① 데이터 수집이 녹화를 쌓는 곳)")
+    else:
+        labels = list(options.keys())
+        current = next(l for l, d in options.items() if d == st.session_state["selected_dataset_id"])
+        dataset_id = options[st.selectbox("데이터셋", options=labels, index=labels.index(current))]
+    st.session_state["selected_dataset_id"] = dataset_id
+    return dataset_id
