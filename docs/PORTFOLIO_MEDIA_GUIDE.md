@@ -3,6 +3,14 @@
 이 저장소의 결과 영상을 포트폴리오에 넣을 때 **어떤 파일을, 어디에, 어떤 문구로** 넣는지 정리한 문서다.
 수치는 모두 2026-11-16~17 실측값이다. 아직 측정하지 않은 값은 "미측정"으로 두고 채우지 않는다.
 
+## 0. 간단 표기용 (영상 아래 한두 줄)
+
+> 실물 리더암 텔레옵 시연 50회(학습 40 / 검증 10)로 ACT를 10,000 step 학습 (RTX 4070 Laptop, 1시간 15분). MuJoCo 시뮬레이션, 손목 카메라 입력.
+>
+> ACT trained for 10k steps on 50 real-leader-arm teleop demos (40 train / 10 val), RTX 4070 Laptop, 1 h 15 min. MuJoCo simulation, wrist-camera input.
+
+- 성공률은 정식 평가(4절) 후에 이 문구 뒤에 덧붙인다. 예: "… 성공률 N/20 (step XXXX)". 평가 전에는 성공률을 적지 않는다.
+
 ## 1. 저장 위치와 파일 이름
 
 영상 파일은 저장소에 넣지 않는다(`reports/eval_runs/`는 `.gitignore`). 포트폴리오 폴더 `바탕 화면\포트폴리오\step2\`에 아래 이름으로 둔다.
