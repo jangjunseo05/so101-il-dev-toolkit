@@ -19,7 +19,7 @@
 | 파일 | 상태 | 길이 | 배속 | 용도 |
 |---|---|---|---|---|
 | `so101_inference_demo.mp4` (+`.png`) | ✅ 있음 | 15.0s | 1× | **학습된 정책이 혼자 집어 놓는 장면** — STEP 2 박스 대표 영상 후보 |
-| `so101_dashboard_summary.mp4` (+`.png`) | 미녹화 | — | 최대 2× | 웹 대시보드 4단계(수집→QA→학습→추론) 사용 장면 |
+| `so101_dashboard_summary.mp4` (+`.png`) | ✅ 있음 | 45.1s | 1× | 웹 대시보드 홈 + 4단계(수집→QA→학습→추론) 사용 장면, 5장면 |
 | `so101_teleop_record.mp4` | 미녹화 (선택) | — | 1× | 실물 리더암으로 MuJoCo 팔로워를 조종하며 녹화하는 장면 |
 | `media_raw\so101_eval20_step10000_web.mp4` | ✅ 있음 (참고) | 301s | 1× | 정식 평가 20 episode 전체(성공 18·실패 2, 자르지 않음). 960×540·crf 30·5.65MB로 웹 규격과 다르며, Netlify 데모 ④에 이 영상이 들어가 있다. 포트폴리오 본문에는 넣지 않고 "전체 평가 영상" 링크로만 쓴다. |
 
@@ -47,7 +47,16 @@
 | 파일 | 한국어 | English |
 |---|---|---|
 | `so101_inference_demo.mp4` | 실물 리더암 텔레옵 시연 50회로 학습한 ACT 정책이 MuJoCo에서 손목 카메라만 보고 큐브를 집어 접시에 놓는 장면 (편집 없는 1회, 1배속) | An ACT policy trained on 50 real-leader-arm teleop demos picks a cube and places it on the plate in MuJoCo using only the wrist camera (one unedited episode, 1×) |
-| `so101_dashboard_summary.mp4` | (녹화 후 작성) | (녹화 후 작성) |
+| `so101_dashboard_summary.mp4` | 웹 대시보드 하나로 데이터 수집(episode 확인) → QA(아웃라이어 기준 조정) → ACT 학습 기록 → 자동 성공률 평가까지 실제 결과를 확인하는 장면 (1배속) | One web dashboard covering data collection (episode browser), QA (outlier threshold), ACT training history and automated success-rate evaluation, on real results (1×) |
+
+`so101_dashboard_summary.mp4` 장면 구성(각 장면 라벨에 번호·1x 표기, 장면 사이는 컷):
+1. 홈 — 헬스 요약(50 episodes, train loss 0.188 @ step 10000, 18/20)과 단계별 가이드
+2. ① 데이터 수집 — episode 49 둘러보기: MuJoCo 3인칭 → 손목 카메라(학습 입력) 영상 + 관절 궤적
+3. ② QA — 값 기준 z 3.0 → 2.5로 바꾸면 clean 프레임 21,887 → 21,402, 아웃라이어 표가 늘어남. **2.5 결과는 녹화 전에 한 번 계산해 둔 캐시**다(처음 계산은 약 49초 걸림) — 즉시 바뀌는 것처럼 보이는 이유
+4. ③ 학습 — 이번 run(20261116_221202) 기록: 완료, 22:12→23:27, 1시간 15분, train loss 곡선
+5. ④ 추론 — 자동 성공률 평가 비교표(10000 18/20, 8000 10/20, 6000 13/20)와 20 episode 평가 영상의 첫 episode 일부
+
+녹화 방법: 별도 Chrome 창을 DevTools 프로토콜로 조작하고 화면 변화를 그대로 캡처(1440×810 화면, 1.5배 해상도 → 1280×720). 스크롤·클릭만 자동이고 화면 내용은 실제 대시보드 그대로다. Streamlit 자체 버튼(Deploy, 메뉴, 안내 팝업)만 숨겼다.
 
 ## 4. 함께 적을 수 있는 실측 사실
 
