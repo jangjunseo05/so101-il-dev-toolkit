@@ -25,11 +25,13 @@ st.success/error 한 줄로 유지(페이지 하단의 "헤드리스 검증 결�
 세션 간 크래시 추적이 없음) -- action 카드보다 위, warning role.
 """
 
+import json
 import subprocess
 import sys
 import time
 from pathlib import Path
 
+import pandas as pd
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
@@ -322,13 +324,139 @@ else:
                     st.selectbox("체크포인트", options=_option_labels, key="sim_ckpt")
                     st.caption(
                         "MuJoCo 뷰어 창(+카메라 미리보기)이 로컬에 뜨고, policy가 자율로 움직이는 걸 직접 관찰합니다. "
-                        "R 키: episode 리셋. 뷰어 창을 닫거나 위 버튼으로 세션을 끝낼 수 있습니다."
+                        "팔은 학습 데이터의 쉬는 자세에서 시작하고, 한 번 시도한 뒤 쉬는 자세로 돌아오면(성공·실패 무관) "
+                        "로봇과 물체가 자동으로 초기 위치로 돌아갑니다(안 돌아오면 30초 후). "
+                        "R 키: 즉시 리셋. 뷰어 창을 닫거나 위 버튼으로 세션을 끝낼 수 있습니다."
                     )
+
+EVAL_STAGE = "evaluation"
+EVAL_BATCH_SCRIPT = ds.PROJECT_ROOT / "pipeline" / "4_inference" / "eval_batch.py"
+
+
+def _all_step_checkpoints() -> dict[str, str]:
+    """완료된 run의 모든 step 체크포인트 {라벨: pretrained_model 경로} (최신 run, 큰 step 먼저)."""
+    out = {}
+    for run in tr.list_completed_runs(dataset_id=dataset_id):
+        for c in sorted(tr.list_checkpoints(run["output_dir"]), key=lambda c: -c["step"]):
+            if (Path(c["pretrained_model"]) / "model.safetensors").is_file():
+                out[f"{run['run_id']} step {c['step']}"] = c["pretrained_model"]
+    return out
+
+
+_FAIL_ORDER = ["물체 미접촉", "밀기만 함(못 집음)", "들었지만 접시에 못 놓음"]
+
+
+def _render_eval_batch(batch: dict) -> None:
+    _dir = batch["_dir"]
+    rows = []
+    for it in batch["items"]:
+        fc = it.get("failure_counts") or {}
+        rows.append({
+            "체크포인트": it["label"],
+            "상태": {"pending": "대기", "running": "평가 중", "done": "완료", "failed": "실패(에러)"}.get(it["status"], it["status"]),
+            "성공": f"{it['successes']}/{batch['episodes']}" if it.get("status") == "done" else "",
+            "성공률": f"{it['success_rate'] * 100:.0f}%" if it.get("status") == "done" else "",
+            **{k: fc.get(k, 0) if it.get("status") == "done" else "" for k in _FAIL_ORDER},
+            "소요(초)": it.get("wall_seconds", ""),
+        })
+    st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
+    st.caption(
+        f"조건: 체크포인트마다 {batch['episodes']} episode, 물체 시작 위치 ±{batch['obj_jitter_cm']:g}cm 랜덤"
+        f"(seed {batch['seed']} — 모든 체크포인트가 같은 위치 순서로 시험), 팔은 학습 데이터의 쉬는 자세에서 시작. "
+        "물체가 접시 위에 1초 이상 머물면 성공. episode는 한 번 시도 후 팔이 쉬는 자세로 돌아오면 끝"
+        f"(재시도 성공은 안 셈, 안 돌아오면 최대 {batch['max_seconds']:g}초). 실패 유형은 물체 궤적만으로 분류"
+        "(0.5cm 미만 이동=미접촉, 1cm 미만 들림=밀기만 함, 그 이상=들었지만 못 놓음). "
+        f"결과 폴더: `{_dir.relative_to(ds.PROJECT_ROOT)}`"
+    )
+    done = [it for it in batch["items"] if it.get("status") == "done"]
+    if not done:
+        return
+    _pick = st.selectbox("episode별 결과 / 영상 보기", [it["label"] for it in done], key=f"eval_detail_{_dir.name}")
+    it = next(i for i in done if i["label"] == _pick)
+    rep = json.loads((_dir / it["report"]).read_text(encoding="utf-8"))
+    ep_df = pd.DataFrame([{
+        "episode": r["episode"] + 1,
+        "결과": "✅ 성공" if r["success"] else f"❌ {r.get('failure_type') or '실패'}",
+        "놓기까지(초)": r.get("time_to_place_s"),
+        "종료": f"{r.get('ended_by', '')} ({r['sim_seconds']:.0f}초)",
+        "최대 들어올림(cm)": r.get("object_max_lift_cm"),
+        "최종 접시 거리(cm)": round(r["final_dist_to_plate_xy"] * 100, 1),
+        "시작 위치 변화(cm)": ", ".join(f"{v:+.1f}" for v in r.get("object_start_offset_cm", [])),
+        "액션 변화량(rad/호출)": r.get("action_step_change_rad"),
+    } for r in rep["results"]])
+    st.dataframe(ep_df, width='stretch', hide_index=True)
+    if it.get("video") and (_dir / it["video"]).is_file():
+        st.video(str(_dir / it["video"]), muted=True)
+        st.caption(f"{it['label']} 평가 {batch['episodes']} episode 전체를 이어 붙인 3인칭 MuJoCo 렌더 (편집·선별 없음)")
+
+
+eval_status = pm.get_job_status(EVAL_STAGE)
+if not demo_mode.ENABLED and dataset_id == "block_pickplace":
+    with st.container(border=True):
+        render_card_header("🎯", "자동 성공률 평가", "action")
+        st.caption(
+            "학습된 정책이 MuJoCo에서 혼자 물체를 집어 접시에 놓는지 여러 번 돌려 성공률을 잽니다. "
+            "뷰어 창 없이 백그라운드로 돌고, 체크포인트 여러 개를 같은 조건으로 차례로 비교합니다."
+        )
+        if eval_status["running"]:
+            st_autorefresh(interval=2000, key="eval_autorefresh")
+            _el = time.time() - eval_status["started_at"]
+            c1, c2 = st.columns(2)
+            c1.metric("상태", "🎯 평가 중")
+            c2.metric("경과 시간", f"{int(_el // 60)}분 {int(_el % 60)}초")
+            _batches = ds.list_eval_batches(dataset_id=dataset_id)
+            if _batches:
+                _render_eval_batch(_batches[0])
+            st.text_area("실시간 로그", value=pm.tail_log(eval_status["log_path"], n_lines=60), height=220, key="eval_log")
+            if st.button("⏹ 평가 중단", key="eval_stop"):
+                pm.stop_job(EVAL_STAGE, graceful=False)
+                st.rerun()
+        else:
+            _ckpts = _all_step_checkpoints()
+            _conflict_e = pm.check_conflict(EVAL_STAGE)
+            if not _ckpts:
+                st.warning("평가할 체크포인트가 없습니다 — ③에서 학습을 완료하세요.", icon="⚠️")
+            else:
+                _labels = list(_ckpts.keys())
+                _latest_run = _labels[0].rsplit(" step ", 1)[0]
+                _default = [l for l in _labels if l.startswith(_latest_run)][:3]
+                if st.button("🎯 평가 시작", type="primary", disabled=_conflict_e is not None, key="eval_start"):
+                    _sel = st.session_state.get("eval_ckpts") or _default
+                    _cmd = [sys.executable, str(EVAL_BATCH_SCRIPT),
+                            "--episodes", str(int(st.session_state.get("eval_episodes", 20))),
+                            "--obj-jitter-cm", str(st.session_state.get("eval_jitter", 1.0)),
+                            "--seed", "0"]
+                    if st.session_state.get("eval_video", True):
+                        _cmd.append("--video")
+                    for l in _sel:
+                        _cmd += ["--ckpt", f"{l}={_ckpts[l]}"]
+                    try:
+                        pm.start_job(EVAL_STAGE, _cmd)
+                        st.rerun()
+                    except pm.JobConflictError as e:
+                        st.error(str(e))
+                if _conflict_e is not None:
+                    st.caption(f"⚠️ '{_conflict_e}'가 GPU를 사용 중이라 지금은 시작할 수 없습니다.")
+                st.multiselect("평가할 체크포인트", _labels, default=_default, key="eval_ckpts")
+                c1, c2, c3 = st.columns(3)
+                c1.number_input("체크포인트당 episode 수", min_value=1, max_value=100, value=20, step=1, key="eval_episodes")
+                c2.number_input("물체 시작 위치 변화 (±cm)", min_value=0.0, max_value=5.0, value=1.0, step=0.5, key="eval_jitter",
+                                help="0이면 매 episode가 완전히 같은 조건이라 결과도 똑같이 반복됩니다(실측 확인).")
+                c3.checkbox("3인칭 영상 저장", value=True, key="eval_video")
+                st.caption("실측: 영상 없이 30초짜리 episode 2개에 약 17초(모델 로딩 포함). 영상을 저장하면 더 걸립니다.")
+
+        _batches = ds.list_eval_batches(dataset_id=dataset_id)
+        if _batches and not eval_status["running"]:
+            st.markdown("**평가 결과**")
+            _bl = {time.strftime("%m-%d %H:%M", time.localtime(b["started_at"])) + f" ({len(b['items'])}개 체크포인트)": b
+                   for b in _batches}
+            _b = _bl[st.selectbox("평가 기록", list(_bl.keys()), key="eval_batch_select")]
+            _render_eval_batch(_b)
 
 _eval = ds.get_latest_eval_report(dataset_id=dataset_id)
 if _eval:
     with st.container(border=True):
-        render_card_header("🎯", "자동 성공률 평가 (eval_success_mujoco.py)", "success")
+        render_card_header("🎯", "자동 성공률 평가 — 이전 기록 (reports/eval_*.json)", "success")
         st.caption(
             f"학습된 정책이 MuJoCo에서 혼자 물체를 집어 접시에 놓는지 {_eval['episodes']}번 반복 실행. "
             f"물체가 접시 위에 {_eval['hold_seconds']:g}초 이상 머물면 성공, 최대 {_eval['max_seconds']:g}초."
@@ -349,7 +477,8 @@ if dataset_id == "block_pickplace":
     # 제목에 "이전 세션 기록"을 명시(트랙 A 결과는 카드화하지 않고 인라인 유지)
     with st.container(border=True):
         render_card_header("📋", "헤드리스 검증 결과 (이전 세션 기록)", "success")
-        st.caption("`python run_inference_mujoco.py --headless --duration 5` 실행 결과 — 위 트랙 A로 언제든 재현 가능")
+        st.caption("`python run_inference_mujoco.py --headless --duration 5` 실행 결과 — 위 트랙 A로 언제든 재현 가능. "
+                   "⚠️ 저장소에 기록돼 있던 이전 체크포인트 기준 고정 수치이며, 이번 학습 결과가 아닙니다.")
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("물리 스텝", "2510회", "5초 분량")
         c2.metric("policy 호출", "150회", "30Hz × 5초")

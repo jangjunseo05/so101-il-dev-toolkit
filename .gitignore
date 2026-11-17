@@ -5,6 +5,7 @@ checkpoints_bottle/
 logs/
 state/
 train_runs/
+reports/eval_runs/
 *.log
 
 # Per-teammate local settings (COM port, calibration id, dataset paths)

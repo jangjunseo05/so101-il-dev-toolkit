@@ -158,6 +158,71 @@ def update_last_checkpoint_step(run_id: str, log_text: str) -> int | None:
     return step
 
 
+def add_log_path(run_id: str, log_path: str) -> None:
+    """학습(또는 이어서 학습) 시작 시 그 job의 로그 경로를 기록에 추가한다 --
+    재개할 때마다 로그 파일이 새로 생기므로 리스트로 쌓는다."""
+    record = get_run(run_id)
+    if record is None:
+        return
+    paths = record.setdefault("log_paths", [])
+    if log_path not in paths:
+        paths.append(log_path)
+    with open(_run_path(run_id), "w", encoding="utf-8") as f:
+        json.dump(record, f, ensure_ascii=False, indent=2)
+
+
+def find_run_logs(run: dict) -> list[Path]:
+    """run의 로그 파일들. 기록에 log_paths가 없으면(add_log_path 도입 전 run)
+    logs/jobs/training_*.log 앞부분에서 lerobot이 출력한 `'job_name': '<run_id>'`를 찾는다."""
+    paths = [Path(p) for p in run.get("log_paths", []) if Path(p).is_file()]
+    if paths:
+        return paths
+    needle = f"'job_name': '{run.get('run_id')}'"
+    found = []
+    for path in sorted((PROJECT_ROOT / "logs" / "jobs").glob("training_*.log")):
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                head = "".join(f.readline() for _ in range(200))
+        except OSError:
+            continue
+        if needle in head:
+            found.append(path)
+    return found
+
+
+_LOSS_RE = re.compile(r"ot_train\.py:\d+ step:\S+ .*?\bloss:([\d.]+)")
+_LOG_FREQ_RE = re.compile(r"'log_freq': (\d+)")
+
+
+def parse_train_loss(log_paths: list[Path]) -> list[tuple[int, float]]:
+    """로그의 주기적 loss 줄을 (step, loss)로. lerobot은 step을 '10K'처럼 줄여
+    찍으므로 log_freq 간격(n번째 줄 = n*log_freq step)으로 step을 복원한다.
+    재개 로그는 이어지는 step이라 순서대로 이어 붙인다."""
+    points: list[tuple[int, float]] = []
+    for path in log_paths:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        m = _LOG_FREQ_RE.search(text)
+        freq = int(m.group(1)) if m else 1
+        start = points[-1][0] if points else 0
+        for i, loss in enumerate(_LOSS_RE.findall(text), 1):
+            points.append((start + i * freq, float(loss)))
+    return points
+
+
+def list_checkpoints(output_dir: str | Path) -> list[dict]:
+    ckpt_dir = Path(output_dir) / "checkpoints"
+    if not ckpt_dir.is_dir():
+        return []
+    rows = []
+    for entry in sorted(ckpt_dir.iterdir()):
+        if entry.is_dir() and entry.name.isdigit():
+            size = sum(f.stat().st_size for f in entry.rglob("*") if f.is_file())
+            rows.append({"step": int(entry.name), "size_MB": round(size / 2**20, 1),
+                         "saved_at": entry.stat().st_mtime,
+                         "pretrained_model": str(entry / "pretrained_model")})
+    return rows
+
+
 def finalize_run(run_id: str, log_text: str) -> str:
     """학습 프로세스 종료가 감지됐을 때 호출한다. 로그에 정상 완료
     마커(`_COMPLETION_MARKER`)가 있으면 completed, 없으면(크래시든 사용자의

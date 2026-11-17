@@ -6,10 +6,12 @@ run_inference_mujoco.py는 사람이 뷰어로 지켜보는 용도(또는 몇 �
 "몇 번 중 몇 번 성공했는가"를 셀 수 없었다. 이 스크립트는 그 모듈의 관측 생성/
 policy 호출 경로(_select_action)를 그대로 재사용하고, 그 위에 다음만 더한다.
 
-  - episode마다 로봇과 물체를 scene.xml 기본 스폰 위치로 리셋하고 policy.reset()
+  - episode마다 물체를 scene.xml 기본 위치(+선택적 ±--obj-jitter-cm)로, 팔을 학습 데이터의
+    쉬는 자세(run_inference_mujoco.REST_QPOS)로 리셋하고 policy.reset()
   - 성공 판정: 물체 중심이 접시(place_plate) 반경 안(xy)에 있고, 접시 위 높이에
-    놓여 있으며, 그 상태가 --hold-seconds 동안 유지되면 성공으로 보고 조기 종료
-  - --max-seconds 안에 성공하지 못하면 실패
+    놓여 있으며, 그 상태가 --hold-seconds 동안 유지되면 성공
+  - episode 끝: 한 번 시도한 뒤 팔이 쉬는 자세로 돌아오면(AutoEpisode) 끝 -- 실패 후
+    재시도에서의 성공은 세지 않는다. 돌아오지 않으면 --max-seconds에서 끝
   - --video를 주면 3인칭 카메라 장면을 mp4로 저장(episode를 이어 붙임)
   - 결과 요약을 콘솔과 JSON(--report)으로 남김
 
@@ -88,12 +90,34 @@ def _object_on_plate(model, data, plate_xy, plate_radius, object_half, plate_top
     return bool(within and resting)
 
 
+def _classify_failure(moved_m: float, lift_m: float) -> str:
+    """실패 episode를 물체 궤적만으로 나눈다(정책 내부 상태는 보지 않음).
+    임계값: 0.5cm 이상 움직였으면 '건드림', 1cm 이상 떠올랐으면 '들어 올림'."""
+    if moved_m < 0.005:
+        return "물체 미접촉"
+    if lift_m < 0.01:
+        return "밀기만 함(못 집음)"
+    return "들었지만 접시에 못 놓음"
+
+
 def run_episode(*, ep_idx, args, model, data, renderer, policy, preprocessor, postprocessor,
                 follower_qpos_adr, follower_actuator_id, ctrl_lo, ctrl_hi, substeps,
-                scene_renderer=None, scene_cam=None, writer=None):
-    mujoco.mj_resetData(model, data)
+                scene_renderer=None, scene_cam=None, writer=None, rng=None):
+    # 팔은 학습 데이터의 쉬는 자세(rim.REST_QPOS)에서 시작 -- 모든 시연이 이 자세에서 시작했다.
+    rim.reset_to_rest(model, data, follower_qpos_adr, follower_actuator_id)
+    obj_qadr = model.jnt_qposadr[model.body_jntadr[model.body(OBJECT_BODY).id]]
+    offset_xy = [0.0, 0.0]
+    if rng is not None and args.obj_jitter_cm > 0:
+        # 물체 시작 위치를 xy로 ±obj_jitter_cm 균등 랜덤 이동(높이·자세는 그대로).
+        offset_xy = list(rng.uniform(-args.obj_jitter_cm, args.obj_jitter_cm, size=2) / 100.0)
+        data.qpos[obj_qadr:obj_qadr + 2] += offset_xy
     mujoco.mj_forward(model, data)
     policy.reset()
+    obj_start = data.xpos[model.body(OBJECT_BODY).id].copy()
+    max_lift = 0.0
+    max_moved = 0.0
+    prev_targets = None
+    jitter_sum, jitter_n = 0.0, 0
 
     plate_xy = data.xpos[model.body(PLATE_BODY).id][:2].copy()
     plate_radius = float(model.geom(PLATE_GEOM).size[0])
@@ -106,10 +130,12 @@ def run_episode(*, ep_idx, args, model, data, renderer, policy, preprocessor, po
     frame_accum = 0.0
     video_accum = video_interval  # 첫 프레임을 바로 기록
     sim_time = 0.0
-    on_plate_since = None
-    success_time = None
+    # episode 끝 판정은 뷰어 모드와 같은 AutoEpisode: 한 번 시도 후 쉬는 자세로 돌아오면 끝
+    # (실패 후 재시도에서의 성공은 세지 않음), 안 돌아오면 max_seconds에서 끝.
+    auto = rim.AutoEpisode(episode_s=args.max_seconds, hold_s=args.hold_seconds, verbose=False)
+    ended_by = None
 
-    while sim_time < args.max_seconds:
+    while ended_by is None:
         frame_accum += loop_dt
         if frame_accum >= frame_interval:
             frame_accum -= frame_interval
@@ -121,10 +147,18 @@ def run_episode(*, ep_idx, args, model, data, renderer, policy, preprocessor, po
             )
             for act_id, val in zip(follower_actuator_id, targets):
                 data.ctrl[act_id] = val
+            targets = np.asarray(targets, dtype=float)
+            if prev_targets is not None:
+                jitter_sum += float(np.mean(np.abs(targets - prev_targets)))
+                jitter_n += 1
+            prev_targets = targets
 
         for _ in range(substeps):
             mujoco.mj_step(model, data)
         sim_time += loop_dt
+        _p = data.xpos[model.body(OBJECT_BODY).id]
+        max_lift = max(max_lift, float(_p[2] - obj_start[2]))
+        max_moved = max(max_moved, float(np.linalg.norm(_p - obj_start)))
 
         if writer is not None:
             video_accum += loop_dt
@@ -133,27 +167,30 @@ def run_episode(*, ep_idx, args, model, data, renderer, policy, preprocessor, po
                 scene_renderer.update_scene(data, camera=scene_cam)
                 writer.write(scene_renderer.render())
 
-        if _object_on_plate(model, data, plate_xy, plate_radius, object_half, plate_top_z):
-            if on_plate_since is None:
-                on_plate_since = sim_time
-            elif sim_time - on_plate_since >= args.hold_seconds:
-                success_time = on_plate_since
-                break
-        else:
-            on_plate_since = None
+        ended_by = auto.step(loop_dt, _object_on_plate(model, data, plate_xy, plate_radius, object_half, plate_top_z),
+                             data.qpos[follower_qpos_adr])
 
+    success_time = auto.success_at
     obj_pos = data.xpos[model.body(OBJECT_BODY).id].copy()
     result = {
         "episode": ep_idx,
         "success": success_time is not None,
         "time_to_place_s": None if success_time is None else round(success_time, 2),
         "sim_seconds": round(sim_time, 2),
+        "ended_by": {"success": "성공 후 복귀/시간", "fail_returned": "시도 후 복귀", "timeout": "시간 초과"}[ended_by],
         "final_object_xyz": [round(float(v), 4) for v in obj_pos],
         "final_dist_to_plate_xy": round(float(np.linalg.norm(obj_pos[:2] - plate_xy)), 4),
+        "object_start_offset_cm": [round(v * 100, 2) for v in offset_xy],
+        "object_max_lift_cm": round(max_lift * 100, 2),
+        "object_max_moved_cm": round(max_moved * 100, 2),
+        # policy 호출 간 관절 목표값 변화량 평균(rad) -- 떨림 비교용 수치(판정 아님)
+        "action_step_change_rad": round(jitter_sum / jitter_n, 4) if jitter_n else None,
+        "failure_type": None if success_time is not None else _classify_failure(max_moved, max_lift),
     }
-    status = "성공" if result["success"] else "실패"
-    print(f"[eval] episode {ep_idx}: {status} (sim {result['sim_seconds']}s, "
-          f"접시 중심까지 {result['final_dist_to_plate_xy']*100:.1f}cm)", flush=True)
+    status = "성공" if result["success"] else f"실패({result['failure_type']})"
+    print(f"[eval] episode {ep_idx + 1}/{args.episodes}: {status} (sim {result['sim_seconds']}s, "
+          f"접시 중심까지 {result['final_dist_to_plate_xy']*100:.1f}cm, 최대 들어올림 {result['object_max_lift_cm']:.1f}cm)",
+          flush=True)
     return result
 
 
@@ -177,6 +214,10 @@ def main():
     parser.add_argument("--cam-azimuth", type=float, default=200.0)
     parser.add_argument("--cam-elevation", type=float, default=-30.0)
     parser.add_argument("--report", default=None, help="결과 JSON 저장 경로(생략 시 reports/eval_<시각>.json)")
+    parser.add_argument("--obj-jitter-cm", type=float, default=0.0,
+                        help="episode마다 물체 시작 xy를 ±이 값(cm)만큼 랜덤 이동(0이면 매번 같은 위치)")
+    parser.add_argument("--seed", type=int, default=0, help="--obj-jitter-cm 난수 시드(체크포인트 간 같은 위치 비교용)")
+    parser.add_argument("--label", default=None, help="결과 JSON에 남길 표시 이름(예: run_id step)")
     args = parser.parse_args()
 
     print(f"[eval] 체크포인트: {args.checkpoint}")
@@ -207,6 +248,8 @@ def main():
 
     results = []
     t0 = time.time()
+    rng = np.random.default_rng(args.seed)
+    print(f"[eval] {args.episodes} episode 시작 (물체 위치 변화 ±{args.obj_jitter_cm:g}cm, seed {args.seed})", flush=True)
     try:
         for ep in range(args.episodes):
             results.append(run_episode(
@@ -214,7 +257,7 @@ def main():
                 preprocessor=preprocessor, postprocessor=postprocessor,
                 follower_qpos_adr=follower_qpos_adr, follower_actuator_id=follower_actuator_id,
                 ctrl_lo=ctrl_lo, ctrl_hi=ctrl_hi, substeps=substeps,
-                scene_renderer=scene_renderer, scene_cam=scene_cam, writer=writer,
+                scene_renderer=scene_renderer, scene_cam=scene_cam, writer=writer, rng=rng,
             ))
     finally:
         if writer is not None:
@@ -224,8 +267,16 @@ def main():
             scene_renderer.close()
 
     n_ok = sum(r["success"] for r in results)
+    failure_counts: dict[str, int] = {}
+    for r in results:
+        if r["failure_type"]:
+            failure_counts[r["failure_type"]] = failure_counts.get(r["failure_type"], 0) + 1
     summary = {
+        "label": args.label,
         "checkpoint": str(args.checkpoint),
+        "obj_jitter_cm": args.obj_jitter_cm,
+        "seed": args.seed,
+        "failure_counts": failure_counts,
         "episodes": len(results),
         "successes": n_ok,
         "success_rate": round(n_ok / len(results), 3) if results else 0.0,
